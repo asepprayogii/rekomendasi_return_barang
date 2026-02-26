@@ -1,8 +1,0 @@
-streamlit
-pandas
-numpy
-scikit-learn
-imbalanced-learn
-openpyxl
-scipy
-plotly
