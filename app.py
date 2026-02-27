@@ -19,7 +19,7 @@ from datetime import datetime, date, timedelta
 # ============================================================
 
 st.set_page_config(
-    page_title="AI Return Classification",
+    page_title="Sistm rekomendasi return barang",
     page_icon="📦",
     layout="centered",
     initial_sidebar_state="collapsed"
@@ -315,7 +315,7 @@ def show_result(result):
 def main():
     st.markdown("""
     <div class="main-header">
-        <h1>📦 AI Return Classification</h1>
+        <h1>Sistem Rekomendasi Return Barang</h1>
         <p>Sistem Klasifikasi Pengembalian Barang — 2-Layer Hybrid</p>
     </div>""", unsafe_allow_html=True)
 
@@ -501,7 +501,7 @@ def main():
                 st.exception(e)
 
     st.markdown("---")
-    st.caption("AI Return Classification · 2-Layer Hybrid · Random Forest · 11 Kategori Resmi")
+    st.caption("Sistem Rekomendasi Return Barang· 2-Layer Hybrid · Random Forest · 11 Kategori Resmi")
 
 
 if __name__ == "__main__":
