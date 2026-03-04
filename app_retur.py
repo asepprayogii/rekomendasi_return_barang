@@ -187,6 +187,12 @@ def analyze_suspicious_customers(df, bundle):
     """Analisis customer mencurigakan dari file yang diupload"""
     from sklearn.ensemble import IsolationForest
 
+    # Kolom kosong yang dibutuhkan
+    EMPTY_COLS = ['Username (Pembeli)', 'total_retur', 'avg_selisih_hari',
+                  'pct_tidak_valid', 'alasan_unik', 'pct_catatan_kosong',
+                  'is_suspicious', 'risk_score']
+
+    df = df.copy()
     df['Catatan Pengembalian Barang'] = df['Catatan Pengembalian Barang'].fillna('')
     df['catatan_lower'] = df['Catatan Pengembalian Barang'].str.lower()
     df['catatan_kosong'] = (df['catatan_lower'] == '').astype(int)
@@ -214,8 +220,11 @@ def analyze_suspicious_customers(df, bundle):
     customer_stats['pct_tidak_valid'] = customer_stats['Username (Pembeli)'].map(label_map).fillna(0)
 
     multi = customer_stats[customer_stats['total_retur'] >= 2].copy()
+
+    # Tidak cukup data untuk Isolation Forest → return kosong dengan kolom lengkap
     if len(multi) < 5:
-        return multi, pd.DataFrame()
+        empty = pd.DataFrame(columns=EMPTY_COLS)
+        return multi, empty
 
     iso_features = ['total_retur', 'avg_selisih_hari', 'pct_tidak_valid', 'alasan_unik', 'pct_catatan_kosong']
     X_iso = multi[iso_features].fillna(0).values
@@ -223,7 +232,7 @@ def analyze_suspicious_customers(df, bundle):
     multi['is_suspicious'] = (iso.fit_predict(X_iso) == -1).astype(int)
     multi['risk_score'] = -iso.score_samples(X_iso)
 
-    suspicious = multi[multi['is_suspicious'] == 1].sort_values('risk_score', ascending=False)
+    suspicious = multi[multi['is_suspicious'] == 1].sort_values('risk_score', ascending=False).reset_index(drop=True)
     return multi, suspicious
 
 def df_to_excel_bytes(df):
@@ -400,7 +409,11 @@ with tab2:
             with st.spinner("Menganalisis pola customer..."):
                 all_stats, suspicious = analyze_suspicious_customers(df_c, bundle)
 
-            suspicious_filtered = suspicious[suspicious['total_retur'] >= min_retur]
+            # Aman meski suspicious kosong
+            if len(suspicious) > 0 and 'total_retur' in suspicious.columns:
+                suspicious_filtered = suspicious[suspicious['total_retur'] >= min_retur].reset_index(drop=True)
+            else:
+                suspicious_filtered = suspicious.copy()
 
             st.markdown("---")
             col1, col2, col3 = st.columns(3)
