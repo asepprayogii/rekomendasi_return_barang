@@ -460,31 +460,50 @@ with tab2:
                     g = int(255 * (1 - ratio * 0.8))
                     return f'rgb(255,{g},{g})'
 
+                n_rows = len(display_suspicious)
+                n_cols = len(display_suspicious.columns)
                 cell_colors = [
-                    ['white'] * len(display_suspicious),
-                    ['white'] * len(display_suspicious),
-                    ['white'] * len(display_suspicious),
-                    ['white'] * len(display_suspicious),
-                    ['white'] * len(display_suspicious),
-                    ['white'] * len(display_suspicious),
+                    ['#1e1e2e'] * n_rows,  # Username
+                    ['#1e1e2e'] * n_rows,  # Total Retur
+                    ['#1e1e2e'] * n_rows,  # Avg Hari
+                    ['#1e1e2e'] * n_rows,  # % Ditolak
+                    ['#1e1e2e'] * n_rows,  # Variasi Alasan
+                    ['#1e1e2e'] * n_rows,  # % Catatan Kosong
                     [risk_to_color(v) for v in display_suspicious['Risk Score']],
                 ]
+                # Teks putih untuk kolom gelap, hitam untuk kolom Risk Score (merah)
+                font_colors = [
+                    ['white'] * n_rows,
+                    ['white'] * n_rows,
+                    ['white'] * n_rows,
+                    ['white'] * n_rows,
+                    ['white'] * n_rows,
+                    ['white'] * n_rows,
+                    ['#1a1a1a'] * n_rows,
+                ]
                 fig_tbl = go.Figure(go.Table(
+                    columnwidth=[2, 1, 1.2, 1.2, 1.2, 1.5, 1],
                     header=dict(
-                        values=list(display_suspicious.columns),
-                        fill_color='#667eea',
+                        values=[f'<b>{c}</b>' for c in display_suspicious.columns],
+                        fill_color='#4a4aff',
                         font=dict(color='white', size=13),
                         align='center',
-                        height=35
+                        height=38
                     ),
                     cells=dict(
                         values=[display_suspicious[c].tolist() for c in display_suspicious.columns],
                         fill_color=cell_colors,
+                        font=dict(color=font_colors, size=12),
                         align='center',
-                        height=30
+                        height=32
                     )
                 ))
-                fig_tbl.update_layout(margin=dict(t=10,b=10,l=0,r=0), height=min(400, 80+len(display_suspicious)*35))
+                fig_tbl.update_layout(
+                    margin=dict(t=10, b=10, l=0, r=0),
+                    height=min(500, 90 + n_rows * 35),
+                    paper_bgcolor='rgba(0,0,0,0)',
+                    plot_bgcolor='rgba(0,0,0,0)',
+                )
                 st.plotly_chart(fig_tbl, use_container_width=True)
 
                 # Download suspicious list
