@@ -537,7 +537,7 @@ with tab3:
                 """)
 
 # ─── FOOTER ───────────────────────────────────────────────────────────────────
-st.markdown("---")
+st.markdown("---") 
 st.markdown(
     "<div style='text-align:center; color:#888; font-size:12px;'>"
     "Sistem Klasifikasi Retur Otomatis • Powered by Random Forest + IsolationForest"
