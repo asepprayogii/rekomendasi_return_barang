@@ -319,21 +319,16 @@ with tab1:
             col4.metric("🔍 Perlu Dicek", counts.get('PERLU DICEK', 0),
                         delta=f"{counts.get('PERLU DICEK',0)/len(df_result)*100:.1f}%", delta_color="off")
 
-            # Pie chart ringkas
-            import matplotlib.pyplot as plt
-            fig, ax = plt.subplots(figsize=(5, 3))
-            pie_data = counts
-            pie_colors = {
-                'VALID': '#2ecc71',
-                'TIDAK VALID': '#e74c3c',
-                'PERLU DICEK': '#f39c12'
-            }
-            colors = [pie_colors.get(k, '#95a5a6') for k in pie_data.index]
-            ax.pie(pie_data.values, labels=pie_data.index, autopct='%1.1f%%',
-                   colors=colors, startangle=90)
-            ax.set_title('Distribusi Rekomendasi', fontweight='bold')
-            st.pyplot(fig, use_container_width=False)
-            plt.close()
+            import plotly.graph_objects as go
+            fig_pie = go.Figure(go.Pie(
+                labels=counts.index.tolist(),
+                values=counts.values.tolist(),
+                marker_colors=["#2ecc71" if k=="VALID" else "#e74c3c" if k=="TIDAK VALID" else "#f39c12" for k in counts.index],
+                hole=0.35,
+                textinfo='label+percent'
+            ))
+            fig_pie.update_layout(title='Distribusi Rekomendasi', height=350, margin=dict(t=50,b=20,l=20,r=20))
+            st.plotly_chart(fig_pie, use_container_width=False)
 
             # Filter & tampilkan
             st.markdown("#### 🔎 Filter Hasil")
