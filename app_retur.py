@@ -319,15 +319,26 @@ with tab1:
             col4.metric("🔍 Perlu Dicek", counts.get('PERLU DICEK', 0),
                         delta=f"{counts.get('PERLU DICEK',0)/len(df_result)*100:.1f}%", delta_color="off")
 
+            # Pie chart dengan plotly (tidak butuh matplotlib)
             import plotly.graph_objects as go
+            pie_colors_map = {
+                'VALID': '#2ecc71',
+                'TIDAK VALID': '#e74c3c',
+                'PERLU DICEK': '#f39c12'
+            }
             fig_pie = go.Figure(go.Pie(
                 labels=counts.index.tolist(),
                 values=counts.values.tolist(),
-                marker_colors=["#2ecc71" if k=="VALID" else "#e74c3c" if k=="TIDAK VALID" else "#f39c12" for k in counts.index],
+                marker_colors=[pie_colors_map.get(k, '#95a5a6') for k in counts.index],
                 hole=0.35,
                 textinfo='label+percent'
             ))
-            fig_pie.update_layout(title='Distribusi Rekomendasi', height=350, margin=dict(t=50,b=20,l=20,r=20))
+            fig_pie.update_layout(
+                title='Distribusi Rekomendasi',
+                showlegend=True,
+                height=350,
+                margin=dict(t=50, b=20, l=20, r=20)
+            )
             st.plotly_chart(fig_pie, use_container_width=False)
 
             # Filter & tampilkan
@@ -436,10 +447,45 @@ with tab2:
                 display_suspicious['% Catatan Kosong'] = (display_suspicious['% Catatan Kosong'] * 100).round(1).astype(str) + '%'
                 display_suspicious['Risk Score'] = display_suspicious['Risk Score'].round(3)
 
-                st.dataframe(
-                    display_suspicious.style.background_gradient(subset=['Risk Score'], cmap='Reds'),
-                    use_container_width=True
-                )
+                # Warna Risk Score manual tanpa matplotlib
+                import plotly.graph_objects as go
+                max_risk = display_suspicious['Risk Score'].max()
+                min_risk = display_suspicious['Risk Score'].min()
+
+                def risk_to_color(val):
+                    if max_risk == min_risk:
+                        ratio = 1.0
+                    else:
+                        ratio = (val - min_risk) / (max_risk - min_risk)
+                    g = int(255 * (1 - ratio * 0.8))
+                    return f'rgb(255,{g},{g})'
+
+                cell_colors = [
+                    ['white'] * len(display_suspicious),
+                    ['white'] * len(display_suspicious),
+                    ['white'] * len(display_suspicious),
+                    ['white'] * len(display_suspicious),
+                    ['white'] * len(display_suspicious),
+                    ['white'] * len(display_suspicious),
+                    [risk_to_color(v) for v in display_suspicious['Risk Score']],
+                ]
+                fig_tbl = go.Figure(go.Table(
+                    header=dict(
+                        values=list(display_suspicious.columns),
+                        fill_color='#667eea',
+                        font=dict(color='white', size=13),
+                        align='center',
+                        height=35
+                    ),
+                    cells=dict(
+                        values=[display_suspicious[c].tolist() for c in display_suspicious.columns],
+                        fill_color=cell_colors,
+                        align='center',
+                        height=30
+                    )
+                ))
+                fig_tbl.update_layout(margin=dict(t=10,b=10,l=0,r=0), height=min(400, 80+len(display_suspicious)*35))
+                st.plotly_chart(fig_tbl, use_container_width=True)
 
                 # Download suspicious list
                 excel_s = df_to_excel_bytes(suspicious_filtered)
@@ -532,7 +578,7 @@ with tab3:
                 """)
 
 # ─── FOOTER ───────────────────────────────────────────────────────────────────
-st.markdown("---") 
+st.markdown("---")
 st.markdown(
     "<div style='text-align:center; color:#888; font-size:12px;'>"
     "Sistem Klasifikasi Retur Otomatis • Powered by Random Forest + IsolationForest"
