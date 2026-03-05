@@ -317,7 +317,7 @@ def analyze_with_gemini(alasan, catatan, selisih_hari, api_key):
         return "PERLU DICEK", "Library google-generativeai tidak terinstall"
     try:
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel("gemini-1.5-flash")
+        model = genai.GenerativeModel("gemini-2.0-flash")
         response = model.generate_content(build_prompt(alasan, catatan, selisih_hari))
         return parse_ai_response(response.text.strip())
     except Exception as e:
