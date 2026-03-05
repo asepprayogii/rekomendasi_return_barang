@@ -9,11 +9,18 @@ from datetime import datetime
 import warnings
 warnings.filterwarnings('ignore')
 
+# ─── AI PROVIDER IMPORTS ─────────────────────────────────────────────────────
 try:
     from openai import OpenAI
     OPENAI_AVAILABLE = True
 except ImportError:
     OPENAI_AVAILABLE = False
+
+try:
+    import google.generativeai as genai
+    GEMINI_AVAILABLE = True
+except ImportError:
+    GEMINI_AVAILABLE = False
 
 # ─── CONFIG ───────────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -168,7 +175,7 @@ def classify_single(row, bundle):
     label = le.inverse_transform([pred])[0]
     return label, round(proba * 100, 1), f"Confidence: {proba:.1%}"
 
-def classify_dataframe(df, bundle, use_gpt=False, api_key=None, progress_bar=None):
+def classify_dataframe(df, bundle, use_gpt=False, api_key=None, provider="Groq", progress_bar=None):
     """Klasifikasi seluruh dataframe, dengan GPT untuk PERLU DICEK"""
     labels, confidences, notes, gpt_used = [], [], [], []
     total = len(df)
@@ -186,7 +193,7 @@ def classify_dataframe(df, bundle, use_gpt=False, api_key=None, progress_bar=Non
                 selisih = max(0, (tgl_retur - tgl_pesan).days)
             except:
                 selisih = 0
-            gpt_label, gpt_note = analyze_with_gpt(alasan, catatan, selisih, api_key)
+            gpt_label, gpt_note = analyze_with_ai(alasan, catatan, selisih, api_key, provider)
             label = f'🤖 GPT: {gpt_label}'
             note = f'[GPT] {gpt_note}'
             conf = '-'
@@ -215,13 +222,10 @@ def get_label_badge(label):
     else:
         return '<span class="check-badge">🔍 PERLU DICEK</span>'
 
-def analyze_with_gpt(alasan, catatan, selisih_hari, api_key):
-    """Kirim ke OpenAI GPT untuk analisis semantik mendalam"""
-    if not OPENAI_AVAILABLE:
-        return 'PERLU DICEK', 'Library openai tidak terinstall'
-    try:
-        client = OpenAI(api_key=api_key)
-        prompt = f"""Kamu adalah sistem AI untuk memvalidasi pengajuan retur di marketplace Indonesia.
+def build_prompt(alasan, catatan, selisih_hari):
+    """Prompt universal untuk semua provider AI"""
+    return f"""Kamu adalah sistem AI untuk memvalidasi pengajuan retur di marketplace Indonesia.
+Bahasa pembeli bisa campur: formal, slang, atau Inggris — tetap pahami maknanya.
 
 Tugasmu: Analisis pengajuan retur berikut dan tentukan apakah VALID atau TIDAK VALID.
 
@@ -230,17 +234,16 @@ DATA PENGAJUAN:
 - Catatan dari Pembeli: "{catatan if catatan else '(kosong)'}"
 - Hari sejak pesanan dibuat: {selisih_hari} hari
 
-KRITERIA:
-VALID jika:
+KRITERIA VALID:
 - Alasan masuk akal dan konsisten dengan catatan
 - Barang memang bermasalah (cacat, salah kirim, tidak sampai, tidak sesuai deskripsi)
-- Waktu pengajuan wajar (tidak terlalu lama setelah terima barang)
+- Waktu pengajuan wajar
 
-TIDAK VALID jika:
+KRITERIA TIDAK VALID:
 - Alasan tidak konsisten atau catatan mencurigakan
-- Pembeli terkesan menyalahgunakan sistem retur
+- Terkesan menyalahgunakan sistem retur
 - Catatan mengandung tekanan/ancaman tidak wajar
-- Alasan terlalu umum tanpa penjelasan spesifik padahal barangnya high-value
+- Alasan terlalu umum tanpa penjelasan, apalagi barang high-value
 
 Jawab HANYA dalam format JSON berikut, tanpa teks lain:
 {{
@@ -248,25 +251,73 @@ Jawab HANYA dalam format JSON berikut, tanpa teks lain:
   "alasan": "penjelasan singkat max 20 kata dalam bahasa Indonesia"
 }}"""
 
+def parse_ai_response(raw):
+    """Parse JSON response dari semua provider"""
+    try:
+        raw = raw.replace("```json", "").replace("```", "").strip()
+        result = json.loads(raw)
+        label = result.get("label", "PERLU DICEK")
+        alasan = result.get("alasan", "-")
+        if label not in ["VALID", "TIDAK VALID"]:
+            label = "PERLU DICEK"
+        return label, alasan
+    except json.JSONDecodeError:
+        return "PERLU DICEK", "Response AI tidak valid, perlu cek manual"
+
+def analyze_with_openai(alasan, catatan, selisih_hari, api_key):
+    """Analisis via OpenAI GPT-4o-mini"""
+    if not OPENAI_AVAILABLE:
+        return "PERLU DICEK", "Library openai tidak terinstall"
+    try:
+        client = OpenAI(api_key=api_key)
         response = client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
+            messages=[{"role": "user", "content": build_prompt(alasan, catatan, selisih_hari)}],
             temperature=0,
             max_tokens=150,
         )
-        raw = response.choices[0].message.content.strip()
-        # Bersihkan markdown code block jika ada
-        raw = raw.replace('```json', '').replace('```', '').strip()
-        result = json.loads(raw)
-        label = result.get('label', 'PERLU DICEK')
-        alasan_gpt = result.get('alasan', '-')
-        if label not in ['VALID', 'TIDAK VALID']:
-            label = 'PERLU DICEK'
-        return label, alasan_gpt
-    except json.JSONDecodeError:
-        return 'PERLU DICEK', 'GPT response tidak valid, perlu cek manual'
+        return parse_ai_response(response.choices[0].message.content.strip())
     except Exception as e:
-        return 'PERLU DICEK', f'Error GPT: {str(e)[:60]}'
+        return "PERLU DICEK", f"Error OpenAI: {str(e)[:60]}"
+
+def analyze_with_groq(alasan, catatan, selisih_hari, api_key):
+    """Analisis via Groq (Llama gratis)"""
+    if not OPENAI_AVAILABLE:
+        return "PERLU DICEK", "Library openai tidak terinstall (Groq pakai openai client)"
+    try:
+        client = OpenAI(api_key=api_key, base_url="https://api.groq.com/openai/v1")
+        response = client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[{"role": "user", "content": build_prompt(alasan, catatan, selisih_hari)}],
+            temperature=0,
+            max_tokens=150,
+        )
+        return parse_ai_response(response.choices[0].message.content.strip())
+    except Exception as e:
+        return "PERLU DICEK", f"Error Groq: {str(e)[:60]}"
+
+def analyze_with_gemini(alasan, catatan, selisih_hari, api_key):
+    """Analisis via Google Gemini"""
+    if not GEMINI_AVAILABLE:
+        return "PERLU DICEK", "Library google-generativeai tidak terinstall"
+    try:
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel("gemini-1.5-flash")
+        response = model.generate_content(build_prompt(alasan, catatan, selisih_hari))
+        return parse_ai_response(response.text.strip())
+    except Exception as e:
+        return "PERLU DICEK", f"Error Gemini: {str(e)[:60]}"
+
+def analyze_with_ai(alasan, catatan, selisih_hari, api_key, provider="Groq"):
+    """Router ke provider yang dipilih"""
+    if provider == "OpenAI":
+        return analyze_with_openai(alasan, catatan, selisih_hari, api_key)
+    elif provider == "Groq":
+        return analyze_with_groq(alasan, catatan, selisih_hari, api_key)
+    elif provider == "Google Gemini":
+        return analyze_with_gemini(alasan, catatan, selisih_hari, api_key)
+    return "PERLU DICEK", "Provider tidak dikenali"
+
 
 def analyze_suspicious_customers(df, bundle):
     """Analisis customer mencurigakan dari file yang diupload"""
@@ -350,19 +401,37 @@ with st.sidebar:
         st.error("❌ Model tidak ditemukan.\nJalankan notebook terlebih dahulu untuk melatih model.")
 
     st.divider()
-    st.markdown("### 🤖 OpenAI GPT Integration")
-    openai_api_key = st.text_input(
-        "OpenAI API Key",
-        type="password",
-        placeholder="sk-...",
-        help="Digunakan untuk analisis semantik pada kasus PERLU DICEK"
+    st.markdown("### 🤖 AI Semantic Analysis")
+    st.caption("Untuk analisis mendalam kasus PERLU DICEK")
+
+    ai_provider = st.selectbox(
+        "Pilih Provider AI",
+        options=["Groq (Gratis ⭐)", "Google Gemini (Gratis)", "OpenAI (Berbayar)"],
+        index=0,
+        help="Groq dan Gemini gratis. OpenAI berbayar tapi paling akurat."
     )
+    provider_map = {
+        "Groq (Gratis ⭐)": ("Groq", "gsk_", "console.groq.com", "gsk_..."),
+        "Google Gemini (Gratis)": ("Google Gemini", "AIza", "aistudio.google.com", "AIzaSy-..."),
+        "OpenAI (Berbayar)": ("OpenAI", "sk-", "platform.openai.com", "sk-..."),
+    }
+    provider, key_prefix, key_url, key_placeholder = provider_map[ai_provider]
+
+    st.caption(f"🔗 Daftar & ambil API key: [{key_url}](https://{key_url})")
+
+    openai_api_key = st.text_input(
+        f"{provider} API Key",
+        type="password",
+        placeholder=key_placeholder,
+        help=f"API key dari {key_url}"
+    )
+
     if openai_api_key:
-        if openai_api_key.startswith('sk-'):
-            st.success("✅ API Key tersimpan")
-            use_gpt = st.toggle("Aktifkan analisis GPT untuk PERLU DICEK", value=True)
+        if openai_api_key.startswith(key_prefix):
+            st.success(f"✅ {provider} API Key valid")
+            use_gpt = st.toggle("Aktifkan analisis AI untuk PERLU DICEK", value=True)
         else:
-            st.error("❌ Format API Key tidak valid")
+            st.error(f"❌ Format key {provider} harus diawali '{key_prefix}'")
             openai_api_key = None
             use_gpt = False
     else:
@@ -377,12 +446,12 @@ with st.sidebar:
     | ✅ **VALID** | Pengajuan layak diterima |
     | ❌ **TIDAK VALID** | Pengajuan ditolak |
     | 🔍 **PERLU DICEK** | Perlu verifikasi manual |
-    | 🤖 **GPT: VALID** | GPT konfirmasi valid |
-    | 🤖 **GPT: TIDAK VALID** | GPT konfirmasi tidak valid |
+    | 🤖 **AI: VALID** | AI konfirmasi valid |
+    | 🤖 **AI: TIDAK VALID** | AI konfirmasi tidak valid |
 
     ### 🔍 Alur Klasifikasi
-    1. TF-IDF → **VALID / TIDAK VALID** (langsung final)
-    2. TF-IDF → **PERLU DICEK** → GPT baca & analisis semantik → label final
+    1. TF-IDF → **VALID / TIDAK VALID** → langsung final
+    2. TF-IDF → **PERLU DICEK** → AI analisis semantik → label final
     """)
 
 # ─── TABS ─────────────────────────────────────────────────────────────────────
@@ -409,10 +478,10 @@ with tab1:
 
         # Info GPT jika aktif
         if use_gpt and openai_api_key:
-            perlu_dicek_est = int(len(df_input) * 0.19)  # estimasi ~19% dari data historis
-            st.info(f"🤖 GPT aktif — estimasi ~{perlu_dicek_est} baris akan dianalisis GPT (kasus PERLU DICEK)")
+            perlu_dicek_est = int(len(df_input) * 0.19)
+            st.info(f"🤖 **{provider}** aktif — estimasi ~{perlu_dicek_est} baris akan dianalisis AI (kasus PERLU DICEK)")
         else:
-            st.caption("💡 Aktifkan GPT di sidebar untuk analisis semantik pada kasus PERLU DICEK")
+            st.caption("💡 Aktifkan AI provider di sidebar untuk analisis semantik pada kasus PERLU DICEK")
 
         # Proses
         if st.button("🚀 Jalankan Klasifikasi", type="primary", use_container_width=True):
@@ -421,6 +490,7 @@ with tab1:
                 df_input, bundle,
                 use_gpt=use_gpt,
                 api_key=openai_api_key if use_gpt else None,
+                provider=provider,
                 progress_bar=progress_bar
             )
             progress_bar.empty()
@@ -444,7 +514,7 @@ with tab1:
             col5.metric("🤖 Dianalisis GPT", n_gpt, delta_color="off")
 
             if n_gpt > 0:
-                st.success(f"🤖 **{n_gpt} kasus** berhasil dianalisis GPT secara semantik — tidak perlu cek manual!")
+                st.success(f"🤖 **{n_gpt} kasus** berhasil dianalisis {provider} secara semantik — tidak perlu cek manual!")
 
             # Pie chart dengan plotly
             import plotly.graph_objects as go
@@ -715,11 +785,11 @@ with tab3:
                 # Tawarkan analisis GPT jika tersedia
                 if use_gpt and openai_api_key:
                     st.markdown("---")
-                    if st.button("🤖 Analisis dengan GPT sekarang", type="secondary"):
-                        with st.spinner("GPT sedang membaca dan menganalisis catatan..."):
+                    if st.button(f"🤖 Analisis dengan {provider} sekarang", type="secondary"):
+                        with st.spinner(f"{provider} sedang membaca dan menganalisis catatan..."):
                             selisih_tes = max(0, (tgl_retur - tgl_pesanan).days)
-                            gpt_label, gpt_note = analyze_with_gpt(
-                                alasan_input, catatan_input, selisih_tes, openai_api_key
+                            gpt_label, gpt_note = analyze_with_ai(
+                                alasan_input, catatan_input, selisih_tes, openai_api_key, provider
                             )
                         if gpt_label == 'VALID':
                             st.success(f"🤖 **GPT: VALID**\n\n_{gpt_note}_")
