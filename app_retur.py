@@ -235,27 +235,34 @@ def build_prompt(alasan, catatan, selisih_hari):
     return f"""Kamu adalah sistem AI untuk memvalidasi pengajuan retur di marketplace Indonesia.
 Bahasa pembeli bisa campur: formal, slang, atau Inggris — tetap pahami maknanya.
 
-Tugasmu: Analisis pengajuan retur berikut dan tentukan apakah VALID atau TIDAK VALID.
+Tugasmu: Tentukan label pengajuan retur: VALID, TIDAK VALID, atau PERLU DICEK.
 
 DATA PENGAJUAN:
 - Alasan Pengembalian: {alasan}
 - Catatan dari Pembeli: "{catatan if catatan else '(kosong)'}"
 - Hari sejak pesanan dibuat: {selisih_hari} hari
 
-KRITERIA VALID:
-- Alasan masuk akal dan konsisten dengan catatan
-- Barang memang bermasalah (cacat, salah kirim, tidak sampai, tidak sesuai deskripsi)
-- Waktu pengajuan wajar
+KRITERIA VALID (jika yakin):
+- Alasan jelas dan konsisten dengan catatan
+- Barang bermasalah nyata: cacat, salah kirim, tidak sampai, tidak sesuai deskripsi
+- Waktu pengajuan wajar, catatan mendukung alasan secara logis
 
-KRITERIA TIDAK VALID:
-- Alasan tidak konsisten atau catatan mencurigakan
-- Terkesan menyalahgunakan sistem retur
-- Catatan mengandung tekanan/ancaman tidak wajar
-- Alasan terlalu umum tanpa penjelasan, apalagi barang high-value
+KRITERIA TIDAK VALID (jika yakin):
+- Alasan tidak konsisten atau bertentangan dengan catatan
+- Terindikasi menyalahgunakan sistem retur
+- Catatan kosong padahal alasan serius yang butuh penjelasan
+- Alasan terlalu umum/tidak spesifik untuk barang bernilai tinggi
+- Ada indikasi tekanan, ancaman, atau manipulasi
+
+KRITERIA PERLU DICEK (jika tidak cukup yakin):
+- Catatan menyebut ada foto, video, bukti, atau lampiran yang perlu diverifikasi
+- Alasan dan catatan tidak konsisten tapi tidak jelas siapa yang salah
+- Informasi tidak cukup untuk memutuskan valid atau tidak
+- Ada kejanggalan yang perlu dikonfirmasi ke pembeli atau penjual
 
 Jawab HANYA dalam format JSON berikut, tanpa teks lain:
 {{
-  "label": "VALID" atau "TIDAK VALID",
+  "label": "VALID" atau "TIDAK VALID" atau "PERLU DICEK",
   "alasan": "penjelasan singkat max 20 kata dalam bahasa Indonesia"
 }}"""
 
@@ -266,7 +273,7 @@ def parse_ai_response(raw):
         result = json.loads(raw)
         label = result.get("label", "PERLU DICEK")
         alasan = result.get("alasan", "-")
-        if label not in ["VALID", "TIDAK VALID"]:
+        if label not in ["VALID", "TIDAK VALID", "PERLU DICEK"]:
             label = "PERLU DICEK"
         return label, alasan
     except json.JSONDecodeError:
@@ -489,10 +496,16 @@ with tab1:
         else:
             st.caption("💡 Aktifkan AI provider di sidebar untuk analisis semantik semua baris")
 
+        # Reset session state jika file baru diupload
+        file_key = f"{uploaded_file.name}_{len(df_input)}"
+        if st.session_state.get('last_file') != file_key:
+            st.session_state['df_result'] = None
+            st.session_state['last_file'] = file_key
+
         # Proses
         if st.button("🚀 Jalankan Klasifikasi", type="primary", use_container_width=True):
             progress_bar = st.progress(0, text="Memulai klasifikasi...")
-            df_result = classify_dataframe(
+            st.session_state['df_result'] = classify_dataframe(
                 df_input, bundle,
                 use_gpt=use_gpt,
                 api_key=openai_api_key if use_gpt else None,
@@ -500,6 +513,10 @@ with tab1:
                 progress_bar=progress_bar
             )
             progress_bar.empty()
+
+        # Tampilkan hasil jika sudah ada di session_state
+        if st.session_state.get('df_result') is not None:
+            df_result = st.session_state['df_result']
 
             st.markdown("---")
             st.markdown("### 📊 Hasil Klasifikasi")
