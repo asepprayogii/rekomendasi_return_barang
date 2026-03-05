@@ -176,15 +176,19 @@ def classify_single(row, bundle):
     return label, round(proba * 100, 1), f"Confidence: {proba:.1%}"
 
 def classify_dataframe(df, bundle, use_gpt=False, api_key=None, provider="Groq", progress_bar=None):
-    """Klasifikasi seluruh dataframe, dengan GPT untuk PERLU DICEK"""
-    labels, confidences, notes, gpt_used = [], [], [], []
+    """Klasifikasi seluruh dataframe.
+    - Jika AI aktif: SEMUA baris dianalisis AI, TF-IDF hanya sebagai referensi kolom tambahan
+    - Jika AI tidak aktif: fallback ke TF-IDF saja
+    """
+    labels, confidences, notes, tfidf_refs, ai_used = [], [], [], [], []
     total = len(df)
 
     for i, (_, row) in enumerate(df.iterrows()):
-        label, conf, note = classify_single(row, bundle)
+        # TF-IDF selalu jalan sebagai referensi
+        tfidf_label, tfidf_conf, tfidf_note = classify_single(row, bundle)
 
-        is_gpt = False
-        if label == 'PERLU DICEK' and use_gpt and api_key:
+        if use_gpt and api_key:
+            # AI analisis SEMUA baris tanpa terkecuali
             alasan = str(row.get('Alasan Pengembalian', ''))
             catatan = str(row.get('Catatan Pengembalian Barang', '')) if pd.notna(row.get('Catatan Pengembalian Barang')) else ''
             try:
@@ -193,16 +197,19 @@ def classify_dataframe(df, bundle, use_gpt=False, api_key=None, provider="Groq",
                 selisih = max(0, (tgl_retur - tgl_pesan).days)
             except:
                 selisih = 0
-            gpt_label, gpt_note = analyze_with_ai(alasan, catatan, selisih, api_key, provider)
-            label = f'🤖 GPT: {gpt_label}'
-            note = f'[GPT] {gpt_note}'
-            conf = '-'
-            is_gpt = True
-
-        labels.append(label)
-        confidences.append(conf if conf is not None else '-')
-        notes.append(note)
-        gpt_used.append('✅' if is_gpt else '-')
+            ai_label, ai_note = analyze_with_ai(alasan, catatan, selisih, api_key, provider)
+            labels.append(ai_label)
+            confidences.append('-')
+            notes.append(f'[{provider}] {ai_note}')
+            tfidf_refs.append(f'{tfidf_label} ({tfidf_conf}%)')
+            ai_used.append('✅')
+        else:
+            # Fallback: TF-IDF saja
+            labels.append(tfidf_label)
+            confidences.append(tfidf_conf if tfidf_conf is not None else '-')
+            notes.append(tfidf_note)
+            tfidf_refs.append('-')
+            ai_used.append('-')
 
         if progress_bar is not None:
             progress_bar.progress((i + 1) / total, text=f"Memproses {i+1}/{total} baris...")
@@ -210,8 +217,9 @@ def classify_dataframe(df, bundle, use_gpt=False, api_key=None, provider="Groq",
     df = df.copy()
     df['🤖 Rekomendasi'] = labels
     df['📊 Confidence (%)'] = confidences
-    df['📝 Catatan Sistem'] = notes
-    df['🧠 GPT Digunakan'] = gpt_used
+    df['📝 Alasan AI'] = notes
+    df['📊 TF-IDF Referensi'] = tfidf_refs
+    df['🧠 AI Digunakan'] = ai_used
     return df
 
 def get_label_badge(label):
@@ -429,14 +437,14 @@ with st.sidebar:
     if openai_api_key:
         if openai_api_key.startswith(key_prefix):
             st.success(f"✅ {provider} API Key valid")
-            use_gpt = st.toggle("Aktifkan analisis AI untuk PERLU DICEK", value=True)
+            use_gpt = st.toggle("Aktifkan analisis AI untuk SEMUA baris", value=True)
         else:
             st.error(f"❌ Format key {provider} harus diawali '{key_prefix}'")
             openai_api_key = None
             use_gpt = False
     else:
         use_gpt = False
-        st.caption("💡 Tanpa API key, kasus PERLU DICEK tetap di-flag manual")
+        st.caption("💡 Tanpa API key, sistem pakai TF-IDF saja (fallback)")
 
     st.divider()
     st.markdown("""
@@ -445,13 +453,12 @@ with st.sidebar:
     |-------|------|
     | ✅ **VALID** | Pengajuan layak diterima |
     | ❌ **TIDAK VALID** | Pengajuan ditolak |
-    | 🔍 **PERLU DICEK** | Perlu verifikasi manual |
-    | 🤖 **AI: VALID** | AI konfirmasi valid |
-    | 🤖 **AI: TIDAK VALID** | AI konfirmasi tidak valid |
+    | 🔍 **PERLU DICEK** | Butuh verifikasi manual |
 
     ### 🔍 Alur Klasifikasi
-    1. TF-IDF → **VALID / TIDAK VALID** → langsung final
-    2. TF-IDF → **PERLU DICEK** → AI analisis semantik → label final
+    **AI aktif:** AI analisis semua baris, TF-IDF jadi kolom referensi.
+
+    **AI tidak aktif:** TF-IDF menentukan label (fallback).
     """)
 
 # ─── TABS ─────────────────────────────────────────────────────────────────────
@@ -478,10 +485,9 @@ with tab1:
 
         # Info GPT jika aktif
         if use_gpt and openai_api_key:
-            perlu_dicek_est = int(len(df_input) * 0.19)
-            st.info(f"🤖 **{provider}** aktif — estimasi ~{perlu_dicek_est} baris akan dianalisis AI (kasus PERLU DICEK)")
+            st.info(f"🤖 **{provider}** aktif — **semua {len(df_input)} baris** akan dianalisis AI secara semantik")
         else:
-            st.caption("💡 Aktifkan AI provider di sidebar untuk analisis semantik pada kasus PERLU DICEK")
+            st.caption("💡 Aktifkan AI provider di sidebar untuk analisis semantik semua baris")
 
         # Proses
         if st.button("🚀 Jalankan Klasifikasi", type="primary", use_container_width=True):
@@ -498,23 +504,23 @@ with tab1:
             st.markdown("---")
             st.markdown("### 📊 Hasil Klasifikasi")
 
-            # Metrics - gabungkan label GPT dengan label biasa
+            # Metrics
             counts_raw = df_result['🤖 Rekomendasi'].value_counts()
-            n_valid = counts_raw.get('VALID', 0) + counts_raw.get('🤖 GPT: VALID', 0)
-            n_invalid = counts_raw.get('TIDAK VALID', 0) + counts_raw.get('🤖 GPT: TIDAK VALID', 0)
+            n_valid = counts_raw.get('VALID', 0)
+            n_invalid = counts_raw.get('TIDAK VALID', 0)
             n_perlu = counts_raw.get('PERLU DICEK', 0)
-            n_gpt = counts_raw.get('🤖 GPT: VALID', 0) + counts_raw.get('🤖 GPT: TIDAK VALID', 0)
+            n_ai = df_result['🧠 AI Digunakan'].eq('✅').sum()
             total = len(df_result)
 
             col1, col2, col3, col4, col5 = st.columns(5)
             col1.metric("📋 Total", total)
             col2.metric("✅ Valid", n_valid, delta=f"{n_valid/total*100:.1f}%")
             col3.metric("❌ Tidak Valid", n_invalid, delta=f"-{n_invalid/total*100:.1f}%", delta_color="inverse")
-            col4.metric("🔍 Perlu Dicek Manual", n_perlu, delta_color="off")
-            col5.metric("🤖 Dianalisis GPT", n_gpt, delta_color="off")
+            col4.metric("🔍 Perlu Dicek", n_perlu, delta_color="off")
+            col5.metric("🧠 Dianalisis AI", n_ai, delta_color="off")
 
-            if n_gpt > 0:
-                st.success(f"🤖 **{n_gpt} kasus** berhasil dianalisis {provider} secara semantik — tidak perlu cek manual!")
+            if n_ai > 0:
+                st.success(f"🧠 **{n_ai} baris** dianalisis {provider} secara semantik")
 
             # Pie chart dengan plotly
             import plotly.graph_objects as go
@@ -522,8 +528,6 @@ with tab1:
                 'VALID': '#2ecc71',
                 'TIDAK VALID': '#e74c3c',
                 'PERLU DICEK': '#f39c12',
-                '🤖 GPT: VALID': '#27ae60',
-                '🤖 GPT: TIDAK VALID': '#c0392b',
             }
             fig_pie = go.Figure(go.Pie(
                 labels=counts_raw.index.tolist(),
@@ -542,34 +546,38 @@ with tab1:
 
             # Filter & tampilkan
             st.markdown("#### 🔎 Filter Hasil")
-            all_labels = sorted(df_result['🤖 Rekomendasi'].unique().tolist())
-            filter_label = st.multiselect(
-                "Tampilkan label:",
-                options=all_labels,
-                default=all_labels
-            )
-            df_filtered = df_result[df_result['🤖 Rekomendasi'].isin(filter_label)]
+            col_f1, col_f2 = st.columns([1, 2])
+            with col_f1:
+                filter_mode = st.radio(
+                    "Tampilkan:",
+                    options=["Semua", "VALID", "TIDAK VALID", "PERLU DICEK"],
+                    horizontal=False
+                )
+            if filter_mode == "Semua":
+                df_filtered = df_result.copy()
+            else:
+                df_filtered = df_result[df_result['🤖 Rekomendasi'] == filter_mode]
+            with col_f2:
+                st.metric("Baris ditampilkan", len(df_filtered))
 
             # Kolom yang ditampilkan
             display_cols = [
                 'No. Pengembalian', 'Username (Pembeli)', 'Alasan Pengembalian',
                 'Catatan Pengembalian Barang', 'Tanggal Pesanan Dibuat',
-                'Waktu Pengembalian Diajukan', '🤖 Rekomendasi', '📊 Confidence (%)',
-                '📝 Catatan Sistem', '🧠 GPT Digunakan'
+                'Waktu Pengembalian Diajukan', '🤖 Rekomendasi',
+                '📝 Alasan AI', '📊 TF-IDF Referensi', '🧠 AI Digunakan'
             ]
             display_cols = [c for c in display_cols if c in df_filtered.columns]
 
-            def color_row(val):
-                if val == 'VALID': return 'background-color: #d4edda; color: #155724'
-                elif val == 'TIDAK VALID': return 'background-color: #f8d7da; color: #721c24'
-                elif val == 'PERLU DICEK': return 'background-color: #fff3cd; color: #856404'
-                elif '🤖 GPT: VALID' in str(val): return 'background-color: #c3e6cb; color: #155724; font-weight: bold'
-                elif '🤖 GPT: TIDAK VALID' in str(val): return 'background-color: #f5c6cb; color: #721c24; font-weight: bold'
+            def color_label(val):
+                if val == 'VALID': return 'background-color: #d4edda; color: #155724; font-weight:600'
+                elif val == 'TIDAK VALID': return 'background-color: #f8d7da; color: #721c24; font-weight:600'
+                elif val == 'PERLU DICEK': return 'background-color: #fff3cd; color: #856404; font-weight:600'
                 return ''
 
             st.dataframe(
                 df_filtered[display_cols].style.applymap(
-                    color_row, subset=['🤖 Rekomendasi']
+                    color_label, subset=['🤖 Rekomendasi']
                 ),
                 use_container_width=True,
                 height=400
@@ -773,30 +781,33 @@ with tab3:
             label, conf, note = classify_single(row, bundle)
 
             st.markdown("---")
-            st.markdown("#### 🎯 Hasil Prediksi TF-IDF")
-
+            st.markdown("#### 🎯 Hasil Prediksi TF-IDF (Referensi)")
             if label == 'VALID':
-                st.success(f"✅ **VALID** — Pengajuan retur layak diterima\n\n{note}")
+                st.success(f"✅ **VALID** — {note}")
             elif label == 'TIDAK VALID':
-                st.error(f"❌ **TIDAK VALID** — Pengajuan retur ditolak\n\n{note}")
+                st.error(f"❌ **TIDAK VALID** — {note}")
             else:
                 st.warning(f"🔍 **PERLU DICEK** — {note}")
 
-                # Tawarkan analisis GPT jika tersedia
-                if use_gpt and openai_api_key:
-                    st.markdown("---")
-                    if st.button(f"🤖 Analisis dengan {provider} sekarang", type="secondary"):
-                        with st.spinner(f"{provider} sedang membaca dan menganalisis catatan..."):
-                            selisih_tes = max(0, (tgl_retur - tgl_pesanan).days)
-                            gpt_label, gpt_note = analyze_with_ai(
-                                alasan_input, catatan_input, selisih_tes, openai_api_key, provider
-                            )
-                        if gpt_label == 'VALID':
-                            st.success(f"🤖 **GPT: VALID**\n\n_{gpt_note}_")
-                        else:
-                            st.error(f"🤖 **GPT: TIDAK VALID**\n\n_{gpt_note}_")
-                else:
-                    st.caption("💡 Aktifkan GPT di sidebar untuk analisis semantik otomatis")
+            # Analisis AI untuk SEMUA label
+            if use_gpt and openai_api_key:
+                st.markdown("#### 🧠 Hasil Analisis AI Semantik")
+                if st.button(f"🤖 Analisis dengan {provider}", type="primary", use_container_width=True):
+                    with st.spinner(f"{provider} sedang membaca dan menganalisis..."):
+                        selisih_tes = max(0, (tgl_retur - tgl_pesanan).days)
+                        ai_label, ai_note = analyze_with_ai(
+                            alasan_input, catatan_input, selisih_tes, openai_api_key, provider
+                        )
+                    if ai_label == 'VALID':
+                        st.success(f"✅ **AI: VALID**\n\n_{ai_note}_")
+                    elif ai_label == 'TIDAK VALID':
+                        st.error(f"❌ **AI: TIDAK VALID**\n\n_{ai_note}_")
+                    else:
+                        st.warning(f"🔍 **AI: PERLU DICEK**\n\n_{ai_note}_")
+                    if ai_label != label:
+                        st.info(f"⚠️ Hasil AI **berbeda** dengan TF-IDF — AI lebih akurat karena membaca makna teks")
+            else:
+                st.caption("💡 Aktifkan AI provider di sidebar untuk analisis semantik")
 
             # Detail reasoning
             catatan_lower = catatan_input.lower().strip()
