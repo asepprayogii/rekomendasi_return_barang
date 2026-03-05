@@ -417,41 +417,47 @@ with st.sidebar:
 
     st.divider()
     st.markdown("### 🤖 AI Semantic Analysis")
-    st.caption("Untuk analisis mendalam kasus PERLU DICEK")
+
+    # Auto-baca dari Streamlit Secrets
+    secret_groq = st.secrets.get("GROQ_API_KEY", "") if hasattr(st, 'secrets') else ""
+    secret_gemini = st.secrets.get("GEMINI_API_KEY", "") if hasattr(st, 'secrets') else ""
+    secret_openai = st.secrets.get("OPENAI_API_KEY", "") if hasattr(st, 'secrets') else ""
 
     ai_provider = st.selectbox(
         "Pilih Provider AI",
         options=["Groq (Gratis ⭐)", "Google Gemini (Gratis)", "OpenAI (Berbayar)"],
         index=0,
-        help="Groq dan Gemini gratis. OpenAI berbayar tapi paling akurat."
     )
     provider_map = {
-        "Groq (Gratis ⭐)": ("Groq", "gsk_", "console.groq.com", "gsk_..."),
-        "Google Gemini (Gratis)": ("Google Gemini", "AIza", "aistudio.google.com", "AIzaSy-..."),
-        "OpenAI (Berbayar)": ("OpenAI", "sk-", "platform.openai.com", "sk-..."),
+        "Groq (Gratis ⭐)":      ("G",         "gsk_", secret_groq,   "gsk_..."),
+        "Google Gemini (Gratis)": ("Google Gemini", "AIza", secret_gemini, "AIzaSy-..."),
+        "OpenAI (Berbayar)":      ("OpenAI",        "sk-",  secret_openai, "sk-..."),
     }
-    provider, key_prefix, key_url, key_placeholder = provider_map[ai_provider]
+    provider, key_prefix, secret_key, key_placeholder = provider_map[ai_provider]
 
-    st.caption(f"🔗 Daftar & ambil API key: [{key_url}](https://{key_url})")
-
-    openai_api_key = st.text_input(
-        f"{provider} API Key",
-        type="password",
-        placeholder=key_placeholder,
-        help=f"API key dari {key_url}"
-    )
-
-    if openai_api_key:
-        if openai_api_key.startswith(key_prefix):
+    if secret_key:
+        # Key sudah ada di secrets — tidak perlu input manual
+        st.success(f"✅ {provider} API Key otomatis dari Secrets")
+        openai_api_key = secret_key
+        use_gpt = st.toggle("Aktifkan analisis AI untuk SEMUA baris", value=True)
+    else:
+        # Fallback: input manual jika secrets belum diset
+        st.caption("💡 Belum ada key di Secrets, isi manual di bawah")
+        openai_api_key = st.text_input(
+            f"{provider} API Key (manual)",
+            type="password",
+            placeholder=key_placeholder,
+        )
+        if openai_api_key and openai_api_key.startswith(key_prefix):
             st.success(f"✅ {provider} API Key valid")
             use_gpt = st.toggle("Aktifkan analisis AI untuk SEMUA baris", value=True)
-        else:
-            st.error(f"❌ Format key {provider} harus diawali '{key_prefix}'")
+        elif openai_api_key:
+            st.error(f"❌ Format key harus diawali '{key_prefix}'")
             openai_api_key = None
             use_gpt = False
-    else:
-        use_gpt = False
-        st.caption("💡 Tanpa API key, sistem pakai TF-IDF saja (fallback)")
+        else:
+            use_gpt = False
+            st.caption("💡 Tanpa API key, sistem pakai TF-IDF saja (fallback)")
 
     st.divider()
     st.markdown("""
