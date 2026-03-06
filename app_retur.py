@@ -263,9 +263,12 @@ KRITERIA PERLU DICEK (jika tidak cukup yakin):
 Jawab HANYA dalam format JSON berikut, tanpa teks lain:
 {{
   "label": "VALID" atau "TIDAK VALID" atau "PERLU DICEK",
-  "confidence": angka keyakinan 0-100 (contoh: 85),
+  "pct_valid": <angka 0-100>,
+  "pct_tidak_valid": <angka 0-100>,
+  "pct_perlu_dicek": <angka 0-100>,
   "alasan": "penjelasan singkat max 20 kata dalam bahasa Indonesia"
-}}"""
+}}
+Pastikan pct_valid + pct_tidak_valid + pct_perlu_dicek = 100"""
 def parse_ai_response(raw):
     """Parse JSON response dari semua provider"""
     try:
@@ -273,16 +276,25 @@ def parse_ai_response(raw):
         result = json.loads(raw)
         label = result.get("label", "PERLU DICEK")
         alasan = result.get("alasan", "-")
-        confidence = result.get("confidence", None)
         if label not in ["VALID", "TIDAK VALID", "PERLU DICEK"]:
             label = "PERLU DICEK"
-        # Format confidence jadi string persentase
-        try:
-            conf_str = f"{int(confidence)}%" if confidence is not None else "-"
-        except:
-            conf_str = "-"
+
+        # Ambil 3 persentase
+        pct_valid      = int(result.get("pct_valid", 0))
+        pct_tidak      = int(result.get("pct_tidak_valid", 0))
+        pct_perlu      = int(result.get("pct_perlu_dicek", 0))
+
+        # Normalisasi jika total tidak 100
+        total = pct_valid + pct_tidak + pct_perlu
+        if total > 0 and total != 100:
+            pct_valid = round(pct_valid / total * 100)
+            pct_tidak = round(pct_tidak / total * 100)
+            pct_perlu = 100 - pct_valid - pct_tidak
+
+        conf_str = f"✅{pct_valid}% | ❌{pct_tidak}% | 🔍{pct_perlu}%"
         return label, alasan, conf_str
     except json.JSONDecodeError:
+        return "PERLU DICEK", "Response AI tidak valid, perlu cek manual", "-"
         return "PERLU DICEK", "Response AI tidak valid, perlu cek manual", "-"
 
 def analyze_with_openai(alasan, catatan, selisih_hari, api_key):
