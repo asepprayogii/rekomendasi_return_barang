@@ -197,9 +197,9 @@ def classify_dataframe(df, bundle, use_gpt=False, api_key=None, provider="Groq",
                 selisih = max(0, (tgl_retur - tgl_pesan).days)
             except:
                 selisih = 0
-            ai_label, ai_note = analyze_with_ai(alasan, catatan, selisih, api_key, provider)
+            ai_label, ai_note, ai_conf = analyze_with_ai(alasan, catatan, selisih, api_key, provider)
             labels.append(ai_label)
-            confidences.append('-')
+            confidences.append(ai_conf)
             notes.append(f'[{provider}] {ai_note}')
             tfidf_refs.append(f'{tfidf_label} ({tfidf_conf}%)')
             ai_used.append('✅')
@@ -216,7 +216,7 @@ def classify_dataframe(df, bundle, use_gpt=False, api_key=None, provider="Groq",
 
     df = df.copy()
     df['🤖 Rekomendasi'] = labels
-    df['📊 Confidence (%)'] = confidences
+    df['🎯 AI Confidence'] = confidences
     df['📝 Alasan AI'] = notes
     df['📊 TF-IDF Referensi'] = tfidf_refs
     df['🧠 AI Digunakan'] = ai_used
@@ -235,7 +235,7 @@ def build_prompt(alasan, catatan, selisih_hari):
     return f"""Kamu adalah sistem AI untuk memvalidasi pengajuan retur di marketplace Indonesia.
 Bahasa pembeli bisa campur: formal, slang, atau Inggris — tetap pahami maknanya.
 
-Tugasmu: Tentukan label pengajuan retur: VALID, TIDAK VALID, atau PERLU DICEK.
+Tugasmu: Tentukan label pengajuan retur: VALID, TIDAK VALID, atau PERLU DICEK, beserta persentase keyakinanmu.
 
 DATA PENGAJUAN:
 - Alasan Pengembalian: {alasan}
@@ -263,9 +263,9 @@ KRITERIA PERLU DICEK (jika tidak cukup yakin):
 Jawab HANYA dalam format JSON berikut, tanpa teks lain:
 {{
   "label": "VALID" atau "TIDAK VALID" atau "PERLU DICEK",
+  "confidence": angka keyakinan 0-100 (contoh: 85),
   "alasan": "penjelasan singkat max 20 kata dalam bahasa Indonesia"
 }}"""
-
 def parse_ai_response(raw):
     """Parse JSON response dari semua provider"""
     try:
@@ -273,16 +273,22 @@ def parse_ai_response(raw):
         result = json.loads(raw)
         label = result.get("label", "PERLU DICEK")
         alasan = result.get("alasan", "-")
+        confidence = result.get("confidence", None)
         if label not in ["VALID", "TIDAK VALID", "PERLU DICEK"]:
             label = "PERLU DICEK"
-        return label, alasan
+        # Format confidence jadi string persentase
+        try:
+            conf_str = f"{int(confidence)}%" if confidence is not None else "-"
+        except:
+            conf_str = "-"
+        return label, alasan, conf_str
     except json.JSONDecodeError:
-        return "PERLU DICEK", "Response AI tidak valid, perlu cek manual"
+        return "PERLU DICEK", "Response AI tidak valid, perlu cek manual", "-"
 
 def analyze_with_openai(alasan, catatan, selisih_hari, api_key):
     """Analisis via OpenAI GPT-4o-mini"""
     if not OPENAI_AVAILABLE:
-        return "PERLU DICEK", "Library openai tidak terinstall"
+        return "PERLU DICEK", "Library openai tidak terinstall", "-"
     try:
         client = OpenAI(api_key=api_key)
         response = client.chat.completions.create(
@@ -293,12 +299,12 @@ def analyze_with_openai(alasan, catatan, selisih_hari, api_key):
         )
         return parse_ai_response(response.choices[0].message.content.strip())
     except Exception as e:
-        return "PERLU DICEK", f"Error OpenAI: {str(e)[:60]}"
+        return "PERLU DICEK", f"Error OpenAI: {str(e)[:60]}", "-"
 
 def analyze_with_groq(alasan, catatan, selisih_hari, api_key):
     """Analisis via Groq (Llama gratis)"""
     if not OPENAI_AVAILABLE:
-        return "PERLU DICEK", "Library openai tidak terinstall (Groq pakai openai client)"
+        return "PERLU DICEK", "Library openai tidak terinstall (Groq pakai openai client)", "-"
     try:
         client = OpenAI(api_key=api_key, base_url="https://api.groq.com/openai/v1")
         response = client.chat.completions.create(
@@ -309,19 +315,30 @@ def analyze_with_groq(alasan, catatan, selisih_hari, api_key):
         )
         return parse_ai_response(response.choices[0].message.content.strip())
     except Exception as e:
-        return "PERLU DICEK", f"Error Groq: {str(e)[:60]}"
+        return "PERLU DICEK", f"Error Groq: {str(e)[:60]}", "-"
 
 def analyze_with_gemini(alasan, catatan, selisih_hari, api_key):
     """Analisis via Google Gemini"""
+    import time
     if not GEMINI_AVAILABLE:
-        return "PERLU DICEK", "Library google-generativeai tidak terinstall"
+        return "PERLU DICEK", "Library google-generativeai tidak terinstall", "-"
     try:
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel("gemini-2.0-flash")
         response = model.generate_content(build_prompt(alasan, catatan, selisih_hari))
+        time.sleep(0.5)  # jeda 0.5 detik → max ~120 request/menit, aman di free tier
         return parse_ai_response(response.text.strip())
     except Exception as e:
-        return "PERLU DICEK", f"Error Gemini: {str(e)[:60]}"
+        err = str(e)
+        if '429' in err:
+            import time
+            time.sleep(10)  # kalau kena rate limit, tunggu 10 detik lalu retry
+            try:
+                response = model.generate_content(build_prompt(alasan, catatan, selisih_hari))
+                return parse_ai_response(response.text.strip())
+            except:
+                return "PERLU DICEK", "Rate limit Gemini, coba lagi nanti atau pakai Groq", "-"
+        return "PERLU DICEK", f"Error Gemini: {err[:60]}", "-"
 
 def analyze_with_ai(alasan, catatan, selisih_hari, api_key, provider="Groq"):
     """Router ke provider yang dipilih"""
@@ -331,7 +348,7 @@ def analyze_with_ai(alasan, catatan, selisih_hari, api_key, provider="Groq"):
         return analyze_with_groq(alasan, catatan, selisih_hari, api_key)
     elif provider == "Google Gemini":
         return analyze_with_gemini(alasan, catatan, selisih_hari, api_key)
-    return "PERLU DICEK", "Provider tidak dikenali"
+    return "PERLU DICEK", "Provider tidak dikenali", "-"
 
 
 def analyze_suspicious_customers(df, bundle):
@@ -576,7 +593,7 @@ with tab1:
                 'No. Pengembalian', 'Username (Pembeli)', 'Alasan Pengembalian',
                 'Catatan Pengembalian Barang', 'Tanggal Pesanan Dibuat',
                 'Waktu Pengembalian Diajukan', '🤖 Rekomendasi',
-                '📝 Alasan AI', '📊 TF-IDF Referensi', '🧠 AI Digunakan'
+                '🎯 AI Confidence', '📝 Alasan AI', '📊 TF-IDF Referensi', '🧠 AI Digunakan'
             ]
             display_cols = [c for c in display_cols if c in df_filtered.columns]
 
@@ -806,15 +823,15 @@ with tab3:
                 if st.button(f"🤖 Analisis dengan {provider}", type="primary", use_container_width=True):
                     with st.spinner(f"{provider} sedang membaca dan menganalisis..."):
                         selisih_tes = max(0, (tgl_retur - tgl_pesanan).days)
-                        ai_label, ai_note = analyze_with_ai(
+                        ai_label, ai_note, ai_conf = analyze_with_ai(
                             alasan_input, catatan_input, selisih_tes, openai_api_key, provider
                         )
                     if ai_label == 'VALID':
-                        st.success(f"✅ **AI: VALID**\n\n_{ai_note}_")
+                        st.success(f"✅ **AI: VALID** — Keyakinan: **{ai_conf}**\n\n_{ai_note}_")
                     elif ai_label == 'TIDAK VALID':
-                        st.error(f"❌ **AI: TIDAK VALID**\n\n_{ai_note}_")
+                        st.error(f"❌ **AI: TIDAK VALID** — Keyakinan: **{ai_conf}**\n\n_{ai_note}_")
                     else:
-                        st.warning(f"🔍 **AI: PERLU DICEK**\n\n_{ai_note}_")
+                        st.warning(f"🔍 **AI: PERLU DICEK** — Keyakinan: **{ai_conf}**\n\n_{ai_note}_")
                     if ai_label != label:
                         st.info(f"⚠️ Hasil AI **berbeda** dengan TF-IDF — AI lebih akurat karena membaca makna teks")
             else:
