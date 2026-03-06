@@ -9,18 +9,11 @@ from datetime import datetime
 import warnings
 warnings.filterwarnings('ignore')
 
-# ─── AI PROVIDER IMPORTS ─────────────────────────────────────────────────────
 try:
     from openai import OpenAI
-    OPENAI_AVAILABLE = True
+    GROQ_AVAILABLE = True
 except ImportError:
-    OPENAI_AVAILABLE = False
-
-try:
-    import google.generativeai as genai
-    GEMINI_AVAILABLE = True
-except ImportError:
-    GEMINI_AVAILABLE = False
+    GROQ_AVAILABLE = False
 
 # ─── CONFIG ───────────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -30,7 +23,6 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# ─── STYLE ────────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
     .main-header {
@@ -40,50 +32,7 @@ st.markdown("""
         color: white;
         margin-bottom: 25px;
     }
-    .metric-card {
-        background: white;
-        border-radius: 10px;
-        padding: 15px 20px;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.08);
-        border-left: 4px solid #667eea;
-        margin-bottom: 10px;
-    }
-    .valid-badge {
-        background: #d4edda;
-        color: #155724;
-        padding: 3px 10px;
-        border-radius: 20px;
-        font-weight: 600;
-        font-size: 13px;
-    }
-    .invalid-badge {
-        background: #f8d7da;
-        color: #721c24;
-        padding: 3px 10px;
-        border-radius: 20px;
-        font-weight: 600;
-        font-size: 13px;
-    }
-    .check-badge {
-        background: #fff3cd;
-        color: #856404;
-        padding: 3px 10px;
-        border-radius: 20px;
-        font-weight: 600;
-        font-size: 13px;
-    }
-    .suspicious-badge {
-        background: #f8d7da;
-        color: #721c24;
-        padding: 3px 10px;
-        border-radius: 20px;
-        font-weight: 600;
-        font-size: 13px;
-    }
-    .stTabs [data-baseweb="tab"] {
-        font-size: 15px;
-        font-weight: 600;
-    }
+    .stTabs [data-baseweb="tab"] { font-size: 15px; font-weight: 600; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -117,35 +66,30 @@ ALASAN_MAP = {
     'Produk tidak original': 11,
 }
 
-# ─── HELPER FUNCTIONS ─────────────────────────────────────────────────────────
+# ─── MODEL ────────────────────────────────────────────────────────────────────
 @st.cache_resource
 def load_model(path='model_retur.pkl'):
     try:
-        bundle = joblib.load(path)
-        return bundle
-    except Exception as e:
+        return joblib.load(path)
+    except:
         return None
 
+# ─── TF-IDF CLASSIFY ──────────────────────────────────────────────────────────
 def classify_single(row, bundle):
-    """Klasifikasi satu baris pengajuan retur"""
     alasan = str(row.get('Alasan Pengembalian', ''))
-    catatan = str(row.get('Catatan Pengembalian Barang', '')) if pd.notna(row.get('Catatan Pengembalian Barang')) else ''
+    catatan_raw = row.get('Catatan Pengembalian Barang')
+    catatan = str(catatan_raw) if pd.notna(catatan_raw) else ''
     catatan_lower = catatan.lower().strip()
 
-    # Hitung fitur
     ada_lampiran = int(any(kw in catatan_lower for kw in KEYWORD_LAMPIRAN))
     catatan_kosong = int(catatan_lower == '')
     alasan_butuh_bukti_flag = int(alasan in ALASAN_BUTUH_BUKTI)
     perlu_dicek = ada_lampiran or (alasan_butuh_bukti_flag and catatan_kosong)
 
     if perlu_dicek:
-        if ada_lampiran:
-            alasan_note = f"Catatan menyebut lampiran visual"
-        else:
-            alasan_note = f"Alasan butuh bukti visual, catatan kosong"
-        return 'PERLU DICEK', None, alasan_note
+        note = "Catatan menyebut lampiran visual" if ada_lampiran else "Alasan butuh bukti visual, catatan kosong"
+        return 'PERLU DICEK', None, note
 
-    # Tanggal
     try:
         tgl_pesan = pd.to_datetime(row.get('Tanggal Pesanan Dibuat'))
         tgl_retur = pd.to_datetime(row.get('Waktu Pengembalian Diajukan'))
@@ -156,12 +100,7 @@ def classify_single(row, bundle):
     tipe = str(row.get('Tipe Pengembalian', 'Seluruh Pesanan'))
     teks = (alasan + ' ' + catatan_lower).lower()
 
-    tfidf = bundle['tfidf']
-    model = bundle['model']
-    le = bundle['label_encoder']
-    num_features = bundle['num_features']
-
-    X_tfidf = tfidf.transform([teks])
+    X_tfidf = bundle['tfidf'].transform([teks])
     X_num = np.array([[
         selisih,
         ALASAN_MAP.get(alasan, 0),
@@ -170,72 +109,17 @@ def classify_single(row, bundle):
         alasan_butuh_bukti_flag
     ]])
     X = sp.hstack([X_tfidf, sp.csr_matrix(X_num)])
-    pred = model.predict(X)[0]
-    proba = model.predict_proba(X)[0].max()
-    label = le.inverse_transform([pred])[0]
+    pred = bundle['model'].predict(X)[0]
+    proba = bundle['model'].predict_proba(X)[0].max()
+    label = bundle['label_encoder'].inverse_transform([pred])[0]
     return label, round(proba * 100, 1), f"Confidence: {proba:.1%}"
 
-def classify_dataframe(df, bundle, use_gpt=False, api_key=None, provider="Groq", progress_bar=None):
-    """Klasifikasi seluruh dataframe.
-    - Jika AI aktif: SEMUA baris dianalisis AI, TF-IDF hanya sebagai referensi kolom tambahan
-    - Jika AI tidak aktif: fallback ke TF-IDF saja
-    """
-    labels, confidences, notes, tfidf_refs, ai_used = [], [], [], [], []
-    total = len(df)
-
-    for i, (_, row) in enumerate(df.iterrows()):
-        # TF-IDF selalu jalan sebagai referensi
-        tfidf_label, tfidf_conf, tfidf_note = classify_single(row, bundle)
-
-        if use_gpt and api_key:
-            # AI analisis SEMUA baris tanpa terkecuali
-            alasan = str(row.get('Alasan Pengembalian', ''))
-            catatan = str(row.get('Catatan Pengembalian Barang', '')) if pd.notna(row.get('Catatan Pengembalian Barang')) else ''
-            try:
-                tgl_pesan = pd.to_datetime(row.get('Tanggal Pesanan Dibuat'))
-                tgl_retur = pd.to_datetime(row.get('Waktu Pengembalian Diajukan'))
-                selisih = max(0, (tgl_retur - tgl_pesan).days)
-            except:
-                selisih = 0
-            ai_label, ai_note, ai_conf = analyze_with_ai(alasan, catatan, selisih, api_key, provider)
-            labels.append(ai_label)
-            confidences.append(ai_conf)
-            notes.append(f'[{provider}] {ai_note}')
-            tfidf_refs.append(f'{tfidf_label} ({tfidf_conf}%)')
-            ai_used.append('✅')
-        else:
-            # Fallback: TF-IDF saja
-            labels.append(tfidf_label)
-            confidences.append(tfidf_conf if tfidf_conf is not None else '-')
-            notes.append(tfidf_note)
-            tfidf_refs.append('-')
-            ai_used.append('-')
-
-        if progress_bar is not None:
-            progress_bar.progress((i + 1) / total, text=f"Memproses {i+1}/{total} baris...")
-
-    df = df.copy()
-    df['🤖 Rekomendasi'] = labels
-    df['🎯 AI Confidence'] = confidences
-    df['📝 Alasan AI'] = notes
-    df['📊 TF-IDF Referensi'] = tfidf_refs
-    df['🧠 AI Digunakan'] = ai_used
-    return df
-
-def get_label_badge(label):
-    if label == 'VALID':
-        return '<span class="valid-badge">✅ VALID</span>'
-    elif label == 'TIDAK VALID':
-        return '<span class="invalid-badge">❌ TIDAK VALID</span>'
-    else:
-        return '<span class="check-badge">🔍 PERLU DICEK</span>'
-
+# ─── GROQ AI ──────────────────────────────────────────────────────────────────
 def build_prompt(alasan, catatan, selisih_hari):
-    """Prompt universal untuk semua provider AI"""
     return f"""Kamu adalah sistem AI untuk memvalidasi pengajuan retur di marketplace Indonesia.
 Bahasa pembeli bisa campur: formal, slang, atau Inggris — tetap pahami maknanya.
 
-Tugasmu: Tentukan label pengajuan retur: VALID, TIDAK VALID, atau PERLU DICEK, beserta persentase keyakinanmu.
+Tugasmu: Tentukan label pengajuan retur: VALID, TIDAK VALID, atau PERLU DICEK.
 
 DATA PENGAJUAN:
 - Alasan Pengembalian: {alasan}
@@ -269,8 +153,8 @@ Jawab HANYA dalam format JSON berikut, tanpa teks lain:
   "alasan": "penjelasan singkat max 20 kata dalam bahasa Indonesia"
 }}
 Pastikan pct_valid + pct_tidak_valid + pct_perlu_dicek = 100"""
+
 def parse_ai_response(raw):
-    """Parse JSON response dari semua provider"""
     try:
         raw = raw.replace("```json", "").replace("```", "").strip()
         result = json.loads(raw)
@@ -278,96 +162,79 @@ def parse_ai_response(raw):
         alasan = result.get("alasan", "-")
         if label not in ["VALID", "TIDAK VALID", "PERLU DICEK"]:
             label = "PERLU DICEK"
-
-        # Ambil 3 persentase
-        pct_valid      = int(result.get("pct_valid", 0))
-        pct_tidak      = int(result.get("pct_tidak_valid", 0))
-        pct_perlu      = int(result.get("pct_perlu_dicek", 0))
-
-        # Normalisasi jika total tidak 100
+        pct_valid = int(result.get("pct_valid", 0))
+        pct_tidak = int(result.get("pct_tidak_valid", 0))
+        pct_perlu = int(result.get("pct_perlu_dicek", 0))
         total = pct_valid + pct_tidak + pct_perlu
         if total > 0 and total != 100:
             pct_valid = round(pct_valid / total * 100)
             pct_tidak = round(pct_tidak / total * 100)
             pct_perlu = 100 - pct_valid - pct_tidak
-
-        conf_str = f"✅{pct_valid}% | ❌{pct_tidak}% | 🔍{pct_perlu}%"
+        conf_str = f"VALID {pct_valid}% | TIDAK VALID {pct_tidak}% | PERLU DICEK {pct_perlu}%"
         return label, alasan, conf_str
     except json.JSONDecodeError:
         return "PERLU DICEK", "Response AI tidak valid, perlu cek manual", "-"
-        return "PERLU DICEK", "Response AI tidak valid, perlu cek manual", "-"
-
-def analyze_with_openai(alasan, catatan, selisih_hari, api_key):
-    """Analisis via OpenAI GPT-4o-mini"""
-    if not OPENAI_AVAILABLE:
-        return "PERLU DICEK", "Library openai tidak terinstall", "-"
-    try:
-        client = OpenAI(api_key=api_key)
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": build_prompt(alasan, catatan, selisih_hari)}],
-            temperature=0,
-            max_tokens=150,
-        )
-        return parse_ai_response(response.choices[0].message.content.strip())
-    except Exception as e:
-        return "PERLU DICEK", f"Error OpenAI: {str(e)[:60]}", "-"
 
 def analyze_with_groq(alasan, catatan, selisih_hari, api_key):
-    """Analisis via Groq (Llama gratis)"""
-    if not OPENAI_AVAILABLE:
-        return "PERLU DICEK", "Library openai tidak terinstall (Groq pakai openai client)", "-"
+    if not GROQ_AVAILABLE:
+        return "PERLU DICEK", "Library openai tidak terinstall", "-"
     try:
         client = OpenAI(api_key=api_key, base_url="https://api.groq.com/openai/v1")
         response = client.chat.completions.create(
             model="llama-3.1-8b-instant",
             messages=[{"role": "user", "content": build_prompt(alasan, catatan, selisih_hari)}],
             temperature=0,
-            max_tokens=150,
+            max_tokens=200,
         )
         return parse_ai_response(response.choices[0].message.content.strip())
     except Exception as e:
         return "PERLU DICEK", f"Error Groq: {str(e)[:60]}", "-"
 
-def analyze_with_gemini(alasan, catatan, selisih_hari, api_key):
-    """Analisis via Google Gemini"""
-    import time
-    if not GEMINI_AVAILABLE:
-        return "PERLU DICEK", "Library google-generativeai tidak terinstall", "-"
-    try:
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel("gemini-2.0-flash")
-        response = model.generate_content(build_prompt(alasan, catatan, selisih_hari))
-        time.sleep(0.5)  # jeda 0.5 detik → max ~120 request/menit, aman di free tier
-        return parse_ai_response(response.text.strip())
-    except Exception as e:
-        err = str(e)
-        if '429' in err:
-            import time
-            time.sleep(10)  # kalau kena rate limit, tunggu 10 detik lalu retry
+# ─── CLASSIFY DATAFRAME ───────────────────────────────────────────────────────
+def classify_dataframe(df, bundle, use_ai=False, api_key=None, progress_bar=None):
+    labels, confidences, notes, tfidf_refs, ai_used = [], [], [], [], []
+    total = len(df)
+
+    for i, (_, row) in enumerate(df.iterrows()):
+        tfidf_label, tfidf_conf, tfidf_note = classify_single(row, bundle)
+
+        if use_ai and api_key:
+            alasan = str(row.get('Alasan Pengembalian', ''))
+            catatan_raw = row.get('Catatan Pengembalian Barang')
+            catatan = str(catatan_raw) if pd.notna(catatan_raw) else ''
             try:
-                response = model.generate_content(build_prompt(alasan, catatan, selisih_hari))
-                return parse_ai_response(response.text.strip())
+                selisih = max(0, (pd.to_datetime(row.get('Waktu Pengembalian Diajukan')) -
+                                  pd.to_datetime(row.get('Tanggal Pesanan Dibuat'))).days)
             except:
-                return "PERLU DICEK", "Rate limit Gemini, coba lagi nanti atau pakai Groq", "-"
-        return "PERLU DICEK", f"Error Gemini: {err[:60]}", "-"
+                selisih = 0
+            ai_label, ai_note, ai_conf = analyze_with_groq(alasan, catatan, selisih, api_key)
+            labels.append(ai_label)
+            confidences.append(ai_conf)
+            notes.append(f'[Groq] {ai_note}')
+            tfidf_refs.append(f'{tfidf_label} ({tfidf_conf}%)')
+            ai_used.append('Ya')
+        else:
+            labels.append(tfidf_label)
+            confidences.append(f'{tfidf_conf}%' if tfidf_conf else '-')
+            notes.append(tfidf_note)
+            tfidf_refs.append('-')
+            ai_used.append('-')
 
-def analyze_with_ai(alasan, catatan, selisih_hari, api_key, provider="Groq"):
-    """Router ke provider yang dipilih"""
-    if provider == "OpenAI":
-        return analyze_with_openai(alasan, catatan, selisih_hari, api_key)
-    elif provider == "Groq":
-        return analyze_with_groq(alasan, catatan, selisih_hari, api_key)
-    elif provider == "Google Gemini":
-        return analyze_with_gemini(alasan, catatan, selisih_hari, api_key)
-    return "PERLU DICEK", "Provider tidak dikenali", "-"
+        if progress_bar:
+            progress_bar.progress((i + 1) / total, text=f"Memproses {i+1}/{total} baris...")
 
+    df = df.copy()
+    df['Rekomendasi']      = labels
+    df['AI Confidence']    = confidences
+    df['Alasan AI']        = notes
+    df['TF-IDF Referensi'] = tfidf_refs
+    df['AI Digunakan']     = ai_used
+    return df
 
+# ─── SUSPICIOUS CUSTOMERS ─────────────────────────────────────────────────────
 def analyze_suspicious_customers(df, bundle):
-    """Analisis customer mencurigakan dari file yang diupload"""
     from sklearn.ensemble import IsolationForest
 
-    # Kolom kosong yang dibutuhkan
     EMPTY_COLS = ['Username (Pembeli)', 'total_retur', 'avg_selisih_hari',
                   'pct_tidak_valid', 'alasan_unik', 'pct_catatan_kosong',
                   'is_suspicious', 'risk_score']
@@ -384,11 +251,9 @@ def analyze_suspicious_customers(df, bundle):
     except:
         df['selisih_hari'] = 0
 
-    # Gunakan label dari bundle customer_stats jika ada
     label_map = {}
     if bundle and 'customer_stats' in bundle:
-        cs = bundle['customer_stats']
-        for _, row in cs.iterrows():
+        for _, row in bundle['customer_stats'].iterrows():
             label_map[row['Username (Pembeli)']] = row.get('pct_tidak_valid', 0)
 
     customer_stats = df.groupby('Username (Pembeli)').agg(
@@ -400,11 +265,8 @@ def analyze_suspicious_customers(df, bundle):
     customer_stats['pct_tidak_valid'] = customer_stats['Username (Pembeli)'].map(label_map).fillna(0)
 
     multi = customer_stats[customer_stats['total_retur'] >= 2].copy()
-
-    # Tidak cukup data untuk Isolation Forest → return kosong dengan kolom lengkap
     if len(multi) < 5:
-        empty = pd.DataFrame(columns=EMPTY_COLS)
-        return multi, empty
+        return multi, pd.DataFrame(columns=EMPTY_COLS)
 
     iso_features = ['total_retur', 'avg_selisih_hari', 'pct_tidak_valid', 'alasan_unik', 'pct_catatan_kosong']
     X_iso = multi[iso_features].fillna(0).values
@@ -422,83 +284,64 @@ def df_to_excel_bytes(df):
     return output.getvalue()
 
 # ─── MAIN APP ─────────────────────────────────────────────────────────────────
-
 st.markdown("""
 <div class="main-header">
-    <h1 style="margin:0; font-size:28px;">🔄 Sistem Klasifikasi Retur Otomatis</h1>
-    <p style="margin:5px 0 0 0; opacity:0.85; font-size:15px;">
-        Upload file Excel retur → Sistem menambah kolom rekomendasi otomatis
+    <h1 style="margin:0; font-size:26px;">Sistem Klasifikasi Retur Otomatis</h1>
+    <p style="margin:6px 0 0 0; opacity:0.85; font-size:14px;">
+        Upload file Excel retur — sistem menambah kolom rekomendasi secara otomatis
     </p>
 </div>
 """, unsafe_allow_html=True)
 
 # ─── SIDEBAR ──────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.markdown("### ⚙️ Pengaturan Model")
+    st.markdown("### Pengaturan Model")
     model_path = st.text_input("Path model (.pkl)", value="model_retur.pkl")
     bundle = load_model(model_path)
 
     if bundle:
-        st.success(f"✅ Model loaded")
-        st.info(f"**Model:** {bundle.get('model_name', 'N/A')}")
+        st.success("Model berhasil dimuat")
+        st.info(f"Model: {bundle.get('model_name', 'N/A')}")
     else:
-        st.error("❌ Model tidak ditemukan.\nJalankan notebook terlebih dahulu untuk melatih model.")
+        st.error("Model tidak ditemukan. Jalankan notebook terlebih dahulu.")
 
     st.divider()
-    st.markdown("### 🤖 AI Semantic Analysis")
+    st.markdown("### Groq AI Analysis")
 
-    ai_provider = st.selectbox(
-        "Provider AI",
-        options=["Groq (Gratis ⭐)", "Google Gemini (Gratis)", "OpenAI (Berbayar)"],
-        index=0,
-    )
-    provider_map = {
-        "Groq (Gratis ⭐)":       ("Groq",         "gsk_",  "gsk_..."),
-        "Google Gemini (Gratis)":  ("Google Gemini", "AIza",  "AIzaSy-..."),
-        "OpenAI (Berbayar)":       ("OpenAI",        "sk-",   "sk-..."),
-    }
-    provider, key_prefix, key_placeholder = provider_map[ai_provider]
+    # Ambil API key dari Streamlit Secrets
+    groq_api_key = st.secrets.get("GROQ_API_KEY", "") if hasattr(st, 'secrets') else ""
 
-    openai_api_key = st.text_input(
-        "API Key",
-        type="password",
-        placeholder=key_placeholder,
-    )
-
-    if openai_api_key and openai_api_key.startswith(key_prefix):
-        st.success(f"✅ {provider} siap digunakan")
-        use_gpt = st.toggle("Aktifkan AI", value=True)
-    elif openai_api_key:
-        st.error(f"❌ Key harus diawali '{key_prefix}'")
-        openai_api_key = None
-        use_gpt = False
+    if groq_api_key:
+        st.success("API Key Groq aktif dari Secrets")
+        use_ai = st.toggle("Aktifkan Groq AI", value=True)
     else:
-        use_gpt = False
-        st.caption("Tanpa API key, sistem pakai TF-IDF saja")
+        st.warning("GROQ_API_KEY belum diset di Streamlit Secrets.")
+        st.caption("Cara set: Settings > Secrets > tambah GROQ_API_KEY = 'gsk_...'")
+        use_ai = False
 
     st.divider()
     st.markdown("""
-    ### 📖 Panduan Label
+    ### Panduan Label
     | Label | Arti |
     |-------|------|
-    | ✅ **VALID** | Pengajuan layak diterima |
-    | ❌ **TIDAK VALID** | Pengajuan ditolak |
-    | 🔍 **PERLU DICEK** | Butuh verifikasi manual |
+    | VALID | Pengajuan layak diterima |
+    | TIDAK VALID | Pengajuan ditolak |
+    | PERLU DICEK | Butuh verifikasi manual |
 
-    ### 🔍 Alur Klasifikasi
-    **AI aktif:** AI analisis semua baris, TF-IDF jadi kolom referensi.
+    ### Alur Klasifikasi
+    **AI aktif:** Groq analisis semua baris. TF-IDF sebagai referensi.
 
-    **AI tidak aktif:** TF-IDF menentukan label (fallback).
+    **AI tidak aktif:** TF-IDF menentukan label.
     """)
 
 # ─── TABS ─────────────────────────────────────────────────────────────────────
-tab1, tab2, tab3 = st.tabs(["📂 Klasifikasi File", "🕵️ Deteksi Customer Nakal", "🧪 Test Manual"])
+tab1, tab2, tab3 = st.tabs(["Klasifikasi File", "Deteksi Customer Nakal", "Test Manual"])
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 1: Klasifikasi File
+# TAB 1
 # ══════════════════════════════════════════════════════════════════════════════
 with tab1:
-    st.markdown("### 📂 Upload File Retur")
+    st.markdown("### Upload File Retur")
     uploaded_file = st.file_uploader(
         "Upload file Excel retur (.xlsx)",
         type=['xlsx', 'xls'],
@@ -507,128 +350,109 @@ with tab1:
 
     if uploaded_file and bundle:
         df_input = pd.read_excel(uploaded_file)
-        st.success(f"✅ File dimuat: **{df_input.shape[0]} baris** retur")
+        st.success(f"File dimuat: {df_input.shape[0]} baris")
 
-        # Preview
-        with st.expander("👁️ Preview Data Input (5 baris pertama)"):
+        with st.expander("Preview Data (5 baris pertama)"):
             st.dataframe(df_input.head(), use_container_width=True)
 
-        # Info GPT jika aktif
-        if use_gpt and openai_api_key:
-            st.info(f"🤖 **{provider}** aktif — **semua {len(df_input)} baris** akan dianalisis AI secara semantik")
+        if use_ai and groq_api_key:
+            st.info(f"Groq AI aktif — semua {len(df_input)} baris akan dianalisis secara semantik")
         else:
-            st.caption("💡 Aktifkan AI provider di sidebar untuk analisis semantik semua baris")
+            st.caption("Aktifkan Groq AI di Streamlit Secrets untuk analisis semantik")
 
-        # Reset session state jika file baru diupload
+        # Reset session state jika file baru
         file_key = f"{uploaded_file.name}_{len(df_input)}"
         if st.session_state.get('last_file') != file_key:
             st.session_state['df_result'] = None
             st.session_state['last_file'] = file_key
 
-        # Proses
-        if st.button("🚀 Jalankan Klasifikasi", type="primary", use_container_width=True):
+        if st.button("Jalankan Klasifikasi", type="primary", use_container_width=True):
             progress_bar = st.progress(0, text="Memulai klasifikasi...")
             st.session_state['df_result'] = classify_dataframe(
                 df_input, bundle,
-                use_gpt=use_gpt,
-                api_key=openai_api_key if use_gpt else None,
-                provider=provider,
+                use_ai=use_ai,
+                api_key=groq_api_key if use_ai else None,
                 progress_bar=progress_bar
             )
             progress_bar.empty()
 
-        # Tampilkan hasil jika sudah ada di session_state
         if st.session_state.get('df_result') is not None:
             df_result = st.session_state['df_result']
 
             st.markdown("---")
-            st.markdown("### 📊 Hasil Klasifikasi")
+            st.markdown("### Hasil Klasifikasi")
 
-            # Metrics
-            counts_raw = df_result['🤖 Rekomendasi'].value_counts()
-            n_valid = counts_raw.get('VALID', 0)
-            n_invalid = counts_raw.get('TIDAK VALID', 0)
-            n_perlu = counts_raw.get('PERLU DICEK', 0)
-            n_ai = df_result['🧠 AI Digunakan'].eq('✅').sum()
-            total = len(df_result)
+            counts = df_result['Rekomendasi'].value_counts()
+            n_valid   = counts.get('VALID', 0)
+            n_invalid = counts.get('TIDAK VALID', 0)
+            n_perlu   = counts.get('PERLU DICEK', 0)
+            n_ai      = (df_result['AI Digunakan'] == 'Ya').sum()
+            total     = len(df_result)
 
-            col1, col2, col3, col4, col5 = st.columns(5)
-            col1.metric("📋 Total", total)
-            col2.metric("✅ Valid", n_valid, delta=f"{n_valid/total*100:.1f}%")
-            col3.metric("❌ Tidak Valid", n_invalid, delta=f"-{n_invalid/total*100:.1f}%", delta_color="inverse")
-            col4.metric("🔍 Perlu Dicek", n_perlu, delta_color="off")
-            col5.metric("🧠 Dianalisis AI", n_ai, delta_color="off")
+            c1, c2, c3, c4, c5 = st.columns(5)
+            c1.metric("Total", total)
+            c2.metric("Valid", n_valid, delta=f"{n_valid/total*100:.1f}%")
+            c3.metric("Tidak Valid", n_invalid, delta=f"-{n_invalid/total*100:.1f}%", delta_color="inverse")
+            c4.metric("Perlu Dicek", n_perlu, delta_color="off")
+            c5.metric("Dianalisis AI", n_ai, delta_color="off")
 
             if n_ai > 0:
-                st.success(f"🧠 **{n_ai} baris** dianalisis {provider} secara semantik")
+                st.success(f"{n_ai} baris dianalisis Groq AI secara semantik")
 
-            # Pie chart dengan plotly
+            # Pie chart
             import plotly.graph_objects as go
-            pie_colors_map = {
-                'VALID': '#2ecc71',
-                'TIDAK VALID': '#e74c3c',
-                'PERLU DICEK': '#f39c12',
-            }
             fig_pie = go.Figure(go.Pie(
-                labels=counts_raw.index.tolist(),
-                values=counts_raw.values.tolist(),
-                marker_colors=[pie_colors_map.get(k, '#95a5a6') for k in counts_raw.index],
+                labels=counts.index.tolist(),
+                values=counts.values.tolist(),
+                marker_colors=[
+                    {'VALID': '#2ecc71', 'TIDAK VALID': '#e74c3c', 'PERLU DICEK': '#f39c12'}.get(k, '#95a5a6')
+                    for k in counts.index
+                ],
                 hole=0.35,
                 textinfo='label+percent'
             ))
             fig_pie.update_layout(
                 title='Distribusi Rekomendasi',
-                showlegend=True,
-                height=350,
+                height=320,
                 margin=dict(t=50, b=20, l=20, r=20)
             )
             st.plotly_chart(fig_pie, use_container_width=False)
 
-            # Filter & tampilkan
-            st.markdown("#### 🔎 Filter Hasil")
+            # Filter
+            st.markdown("#### Filter Hasil")
             col_f1, col_f2 = st.columns([1, 2])
             with col_f1:
                 filter_mode = st.radio(
                     "Tampilkan:",
                     options=["Semua", "VALID", "TIDAK VALID", "PERLU DICEK"],
-                    horizontal=False
                 )
-            if filter_mode == "Semua":
-                df_filtered = df_result.copy()
-            else:
-                df_filtered = df_result[df_result['🤖 Rekomendasi'] == filter_mode]
+            df_filtered = df_result if filter_mode == "Semua" else df_result[df_result['Rekomendasi'] == filter_mode]
             with col_f2:
                 st.metric("Baris ditampilkan", len(df_filtered))
 
-            # Kolom yang ditampilkan
             display_cols = [
                 'No. Pengembalian', 'Username (Pembeli)', 'Alasan Pengembalian',
-                'Catatan Pengembalian Barang', 'Tanggal Pesanan Dibuat',
-                'Waktu Pengembalian Diajukan', '🤖 Rekomendasi',
-                '🎯 AI Confidence', '📝 Alasan AI', '📊 TF-IDF Referensi', '🧠 AI Digunakan'
+                'Catatan Pengembalian Barang', 'Rekomendasi',
+                'AI Confidence', 'Alasan AI', 'TF-IDF Referensi'
             ]
             display_cols = [c for c in display_cols if c in df_filtered.columns]
 
             def color_label(val):
-                if val == 'VALID': return 'background-color: #d4edda; color: #155724; font-weight:600'
+                if val == 'VALID':       return 'background-color: #d4edda; color: #155724; font-weight:600'
                 elif val == 'TIDAK VALID': return 'background-color: #f8d7da; color: #721c24; font-weight:600'
                 elif val == 'PERLU DICEK': return 'background-color: #fff3cd; color: #856404; font-weight:600'
                 return ''
 
             st.dataframe(
-                df_filtered[display_cols].style.applymap(
-                    color_label, subset=['🤖 Rekomendasi']
-                ),
+                df_filtered[display_cols].style.applymap(color_label, subset=['Rekomendasi']),
                 use_container_width=True,
                 height=400
             )
 
-            # Download
             st.markdown("---")
-            excel_bytes = df_to_excel_bytes(df_result)
             st.download_button(
-                label="⬇️ Download Hasil Klasifikasi (.xlsx)",
-                data=excel_bytes,
+                label="Download Hasil Klasifikasi (.xlsx)",
+                data=df_to_excel_bytes(df_result),
                 file_name=f"hasil_klasifikasi_retur_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True,
@@ -636,19 +460,19 @@ with tab1:
             )
 
     elif uploaded_file and not bundle:
-        st.warning("⚠️ Model belum dimuat. Latih model di notebook terlebih dahulu.")
-    elif not uploaded_file:
-        st.info("👆 Upload file Excel retur untuk memulai klasifikasi.")
+        st.warning("Model belum dimuat. Latih model di notebook terlebih dahulu.")
+    else:
+        st.info("Upload file Excel retur untuk memulai klasifikasi.")
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 2: Deteksi Customer Nakal
+# TAB 2
 # ══════════════════════════════════════════════════════════════════════════════
 with tab2:
-    st.markdown("### 🕵️ Deteksi Customer Mencurigakan")
-    st.markdown("""
-    Sistem menganalisis pola retur per customer menggunakan **Isolation Forest** untuk mendeteksi
-    customer yang memiliki pola retur tidak wajar (terlalu sering, alasan berulang, dll).
-    """)
+    st.markdown("### Deteksi Customer Mencurigakan")
+    st.markdown(
+        "Sistem menganalisis pola retur per customer menggunakan **Isolation Forest** "
+        "untuk mendeteksi customer yang memiliki pola retur tidak wajar."
+    )
 
     uploaded_file_c = st.file_uploader(
         "Upload file Excel retur untuk analisis customer",
@@ -658,150 +482,133 @@ with tab2:
 
     if uploaded_file_c:
         df_c = pd.read_excel(uploaded_file_c)
-        st.success(f"✅ File dimuat: {df_c.shape[0]} baris, {df_c['Username (Pembeli)'].nunique()} customer unik")
+        st.success(f"File dimuat: {df_c.shape[0]} baris, {df_c['Username (Pembeli)'].nunique()} customer unik")
 
-        min_retur = st.slider("Minimum jumlah retur untuk dianalisis", 2, 10, 3)
+        min_retur = st.slider("Minimum jumlah retur per customer", min_value=2, max_value=10, value=2)
 
-        if st.button("🔍 Analisis Customer", type="primary", use_container_width=True):
-            with st.spinner("Menganalisis pola customer..."):
-                all_stats, suspicious = analyze_suspicious_customers(df_c, bundle)
+        if st.button("Analisis Customer", type="primary", use_container_width=True):
+            with st.spinner("Menganalisis pola retur customer..."):
+                multi, suspicious = analyze_suspicious_customers(df_c, bundle)
 
-            # Aman meski suspicious kosong
-            if len(suspicious) > 0 and 'total_retur' in suspicious.columns:
-                suspicious_filtered = suspicious[suspicious['total_retur'] >= min_retur].reset_index(drop=True)
-            else:
-                suspicious_filtered = suspicious.copy()
+            n_total   = df_c['Username (Pembeli)'].nunique()
+            n_multi   = len(multi)
+            n_suspect = len(suspicious)
 
-            st.markdown("---")
-            col1, col2, col3 = st.columns(3)
-            col1.metric("👥 Total Customer", df_c['Username (Pembeli)'].nunique())
-            col2.metric("📊 Customer Multi-Retur", len(all_stats[all_stats['total_retur'] >= min_retur]))
-            col3.metric("🚨 Terdeteksi Mencurigakan", len(suspicious_filtered))
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Total Customer", n_total)
+            c2.metric("Customer Multi-Retur", n_multi)
+            c3.metric("Terdeteksi Mencurigakan", n_suspect)
 
-            if len(suspicious_filtered) > 0:
-                st.markdown("#### 🚨 Daftar Customer Mencurigakan")
-                st.markdown("""
-                > Customer di bawah ini memiliki pola retur yang **anomali** berdasarkan kombinasi:
-                > frekuensi tinggi, % ditolak tinggi, alasan berulang, atau catatan kosong konsisten.
-                """)
+            if len(suspicious) > 0:
+                st.markdown("### Daftar Customer Mencurigakan")
+                st.caption(
+                    "Customer di bawah ini memiliki pola retur anomali berdasarkan kombinasi: "
+                    "frekuensi tinggi, % ditolak tinggi, alasan berulang, atau catatan kosong konsisten."
+                )
 
-                display_suspicious = suspicious_filtered[[
-                    'Username (Pembeli)', 'total_retur', 'avg_selisih_hari',
-                    'pct_tidak_valid', 'alasan_unik', 'pct_catatan_kosong', 'risk_score'
-                ]].copy()
-                display_suspicious.columns = [
-                    'Username', 'Total Retur', 'Avg Hari Pengajuan',
-                    '% Retur Ditolak', 'Variasi Alasan', '% Catatan Kosong', 'Risk Score'
-                ]
-                display_suspicious['Avg Hari Pengajuan'] = display_suspicious['Avg Hari Pengajuan'].round(1)
-                display_suspicious['% Retur Ditolak'] = (display_suspicious['% Retur Ditolak'] * 100).round(1).astype(str) + '%'
-                display_suspicious['% Catatan Kosong'] = (display_suspicious['% Catatan Kosong'] * 100).round(1).astype(str) + '%'
-                display_suspicious['Risk Score'] = display_suspicious['Risk Score'].round(3)
+                suspicious_filtered = suspicious[suspicious['total_retur'] >= min_retur].copy()
 
-                # Warna Risk Score manual tanpa matplotlib
-                import plotly.graph_objects as go
-                max_risk = display_suspicious['Risk Score'].max()
-                min_risk = display_suspicious['Risk Score'].min()
+                if len(suspicious_filtered) > 0:
+                    display_suspicious = suspicious_filtered[[
+                        'Username (Pembeli)', 'total_retur', 'avg_selisih_hari',
+                        'pct_tidak_valid', 'alasan_unik', 'pct_catatan_kosong', 'risk_score'
+                    ]].copy()
+                    display_suspicious.columns = [
+                        'Username', 'Total Retur', 'Avg Hari Pengajuan',
+                        '% Retur Ditolak', 'Variasi Alasan', '% Catatan Kosong', 'Risk Score'
+                    ]
+                    display_suspicious['Avg Hari Pengajuan'] = display_suspicious['Avg Hari Pengajuan'].round(1)
+                    display_suspicious['% Retur Ditolak']   = display_suspicious['% Retur Ditolak'].round(2)
+                    display_suspicious['% Catatan Kosong']  = display_suspicious['% Catatan Kosong'].round(2)
+                    display_suspicious['Risk Score']        = display_suspicious['Risk Score'].round(3)
 
-                def risk_to_color(val):
-                    if max_risk == min_risk:
-                        ratio = 1.0
-                    else:
-                        ratio = (val - min_risk) / (max_risk - min_risk)
-                    g = int(255 * (1 - ratio * 0.8))
-                    return f'rgb(255,{g},{g})'
+                    import plotly.graph_objects as go
+                    max_risk = display_suspicious['Risk Score'].max()
+                    min_risk = display_suspicious['Risk Score'].min()
 
-                n_rows = len(display_suspicious)
-                n_cols = len(display_suspicious.columns)
-                cell_colors = [
-                    ['#1e1e2e'] * n_rows,  # Username
-                    ['#1e1e2e'] * n_rows,  # Total Retur
-                    ['#1e1e2e'] * n_rows,  # Avg Hari
-                    ['#1e1e2e'] * n_rows,  # % Ditolak
-                    ['#1e1e2e'] * n_rows,  # Variasi Alasan
-                    ['#1e1e2e'] * n_rows,  # % Catatan Kosong
-                    [risk_to_color(v) for v in display_suspicious['Risk Score']],
-                ]
-                # Teks putih untuk kolom gelap, hitam untuk kolom Risk Score (merah)
-                font_colors = [
-                    ['white'] * n_rows,
-                    ['white'] * n_rows,
-                    ['white'] * n_rows,
-                    ['white'] * n_rows,
-                    ['white'] * n_rows,
-                    ['white'] * n_rows,
-                    ['#1a1a1a'] * n_rows,
-                ]
-                fig_tbl = go.Figure(go.Table(
-                    columnwidth=[2, 1, 1.2, 1.2, 1.2, 1.5, 1],
-                    header=dict(
-                        values=[f'<b>{c}</b>' for c in display_suspicious.columns],
-                        fill_color='#4a4aff',
-                        font=dict(color='white', size=13),
-                        align='center',
-                        height=38
-                    ),
-                    cells=dict(
-                        values=[display_suspicious[c].tolist() for c in display_suspicious.columns],
-                        fill_color=cell_colors,
-                        font=dict(color=font_colors, size=12),
-                        align='center',
-                        height=32
+                    def risk_to_color(val):
+                        ratio = (val - min_risk) / (max_risk - min_risk) if max_risk != min_risk else 1.0
+                        g = int(255 * (1 - ratio * 0.8))
+                        return f'rgb(255,{g},{g})'
+
+                    n_rows = len(display_suspicious)
+                    cell_colors = [
+                        ['#1e1e2e'] * n_rows,
+                        ['#1e1e2e'] * n_rows,
+                        ['#1e1e2e'] * n_rows,
+                        ['#1e1e2e'] * n_rows,
+                        ['#1e1e2e'] * n_rows,
+                        ['#1e1e2e'] * n_rows,
+                        [risk_to_color(v) for v in display_suspicious['Risk Score']],
+                    ]
+                    font_colors = [['white']*n_rows]*6 + [['#1a1a1a']*n_rows]
+
+                    fig_tbl = go.Figure(go.Table(
+                        columnwidth=[2, 1, 1.2, 1.2, 1.2, 1.5, 1],
+                        header=dict(
+                            values=[f'<b>{c}</b>' for c in display_suspicious.columns],
+                            fill_color='#4a4aff',
+                            font=dict(color='white', size=13),
+                            align='center', height=38
+                        ),
+                        cells=dict(
+                            values=[display_suspicious[c].tolist() for c in display_suspicious.columns],
+                            fill_color=cell_colors,
+                            font=dict(color=font_colors, size=12),
+                            align='center', height=32
+                        )
+                    ))
+                    fig_tbl.update_layout(
+                        margin=dict(t=10, b=10, l=0, r=0),
+                        height=min(500, 90 + n_rows * 35),
+                        paper_bgcolor='rgba(0,0,0,0)',
                     )
-                ))
-                fig_tbl.update_layout(
-                    margin=dict(t=10, b=10, l=0, r=0),
-                    height=min(500, 90 + n_rows * 35),
-                    paper_bgcolor='rgba(0,0,0,0)',
-                    plot_bgcolor='rgba(0,0,0,0)',
-                )
-                st.plotly_chart(fig_tbl, use_container_width=True)
+                    st.plotly_chart(fig_tbl, use_container_width=True)
 
-                # Download suspicious list
-                excel_s = df_to_excel_bytes(suspicious_filtered)
-                st.download_button(
-                    "⬇️ Download Daftar Customer Mencurigakan",
-                    data=excel_s,
-                    file_name=f"customer_mencurigakan_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
+                    st.download_button(
+                        "Download Daftar Customer Mencurigakan",
+                        data=df_to_excel_bytes(suspicious_filtered),
+                        file_name=f"customer_mencurigakan_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
 
-                # Detail per customer
-                st.markdown("#### 🔎 Detail Retur per Customer")
-                selected_customer = st.selectbox(
-                    "Pilih customer untuk lihat detail retur:",
-                    options=suspicious_filtered['Username (Pembeli)'].tolist()
-                )
-                if selected_customer:
-                    detail = df_c[df_c['Username (Pembeli)'] == selected_customer][[
-                        'No. Pengembalian', 'Nama Produk', 'Alasan Pengembalian',
-                        'Catatan Pengembalian Barang', 'Status Pembatalan/ Pengembalian',
-                        'Tanggal Pesanan Dibuat', 'Waktu Pengembalian Diajukan'
-                    ]]
-                    st.dataframe(detail, use_container_width=True)
+                    st.markdown("#### Detail Retur per Customer")
+                    selected_customer = st.selectbox(
+                        "Pilih customer untuk lihat detail:",
+                        options=suspicious_filtered['Username (Pembeli)'].tolist()
+                    )
+                    if selected_customer:
+                        detail_cols = [c for c in [
+                            'No. Pengembalian', 'Nama Produk', 'Alasan Pengembalian',
+                            'Catatan Pengembalian Barang', 'Status Pembatalan/ Pengembalian',
+                            'Tanggal Pesanan Dibuat', 'Waktu Pengembalian Diajukan'
+                        ] if c in df_c.columns]
+                        st.dataframe(
+                            df_c[df_c['Username (Pembeli)'] == selected_customer][detail_cols],
+                            use_container_width=True
+                        )
+                else:
+                    st.info("Tidak ada customer mencurigakan dengan kriteria minimum retur tersebut.")
             else:
-                st.info("✅ Tidak ada customer mencurigakan yang terdeteksi dengan kriteria saat ini.")
-
+                st.info("Tidak ada customer mencurigakan yang terdeteksi.")
     else:
-        st.info("👆 Upload file Excel untuk memulai analisis customer.")
+        st.info("Upload file Excel untuk memulai analisis customer.")
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 3: Test Manual
+# TAB 3
 # ══════════════════════════════════════════════════════════════════════════════
 with tab3:
-    st.markdown("### 🧪 Test Klasifikasi Manual")
+    st.markdown("### Test Klasifikasi Manual")
     st.markdown("Input satu pengajuan retur secara manual untuk melihat hasil prediksi.")
 
     if not bundle:
-        st.warning("⚠️ Model belum dimuat. Latih model di notebook terlebih dahulu.")
+        st.warning("Model belum dimuat. Latih model di notebook terlebih dahulu.")
     else:
         col_a, col_b = st.columns(2)
         with col_a:
-            alasan_options = list(ALASAN_MAP.keys())
-            alasan_input = st.selectbox("Alasan Pengembalian", options=alasan_options)
-            tgl_pesanan = st.date_input("Tanggal Pesanan Dibuat", value=datetime(2024, 1, 15))
-            tgl_retur = st.date_input("Waktu Pengembalian Diajukan", value=datetime(2024, 1, 20))
-
+            alasan_input = st.selectbox("Alasan Pengembalian", options=list(ALASAN_MAP.keys()))
+            tgl_pesanan  = st.date_input("Tanggal Pesanan Dibuat", value=datetime(2024, 1, 15))
+            tgl_retur    = st.date_input("Waktu Pengembalian Diajukan", value=datetime(2024, 1, 20))
         with col_b:
             catatan_input = st.text_area(
                 "Catatan Pengembalian Barang",
@@ -810,7 +617,7 @@ with tab3:
             )
             tipe_input = st.selectbox("Tipe Pengembalian", ['Seluruh Pesanan', 'Sebagian Pesanan'])
 
-        if st.button("🔍 Prediksi Sekarang", type="primary", use_container_width=True):
+        if st.button("Prediksi", type="primary", use_container_width=True):
             row = {
                 'Alasan Pengembalian': alasan_input,
                 'Catatan Pengembalian Barang': catatan_input,
@@ -821,56 +628,53 @@ with tab3:
             label, conf, note = classify_single(row, bundle)
 
             st.markdown("---")
-            st.markdown("#### 🎯 Hasil Prediksi TF-IDF (Referensi)")
+            st.markdown("#### Hasil TF-IDF (Referensi)")
             if label == 'VALID':
-                st.success(f"✅ **VALID** — {note}")
+                st.success(f"VALID — {note}")
             elif label == 'TIDAK VALID':
-                st.error(f"❌ **TIDAK VALID** — {note}")
+                st.error(f"TIDAK VALID — {note}")
             else:
-                st.warning(f"🔍 **PERLU DICEK** — {note}")
+                st.warning(f"PERLU DICEK — {note}")
 
-            # Analisis AI untuk SEMUA label
-            if use_gpt and openai_api_key:
-                st.markdown("#### 🧠 Hasil Analisis AI Semantik")
-                if st.button(f"🤖 Analisis dengan {provider}", type="primary", use_container_width=True):
-                    with st.spinner(f"{provider} sedang membaca dan menganalisis..."):
+            if use_ai and groq_api_key:
+                st.markdown("#### Hasil Groq AI")
+                if st.button("Analisis dengan Groq", type="secondary", use_container_width=True):
+                    with st.spinner("Groq sedang menganalisis..."):
                         selisih_tes = max(0, (tgl_retur - tgl_pesanan).days)
-                        ai_label, ai_note, ai_conf = analyze_with_ai(
-                            alasan_input, catatan_input, selisih_tes, openai_api_key, provider
+                        ai_label, ai_note, ai_conf = analyze_with_groq(
+                            alasan_input, catatan_input, selisih_tes, groq_api_key
                         )
                     if ai_label == 'VALID':
-                        st.success(f"✅ **AI: VALID** — Keyakinan: **{ai_conf}**\n\n_{ai_note}_")
+                        st.success(f"VALID\n\nKonfidensitas: {ai_conf}\n\n{ai_note}")
                     elif ai_label == 'TIDAK VALID':
-                        st.error(f"❌ **AI: TIDAK VALID** — Keyakinan: **{ai_conf}**\n\n_{ai_note}_")
+                        st.error(f"TIDAK VALID\n\nKonfidensitas: {ai_conf}\n\n{ai_note}")
                     else:
-                        st.warning(f"🔍 **AI: PERLU DICEK** — Keyakinan: **{ai_conf}**\n\n_{ai_note}_")
+                        st.warning(f"PERLU DICEK\n\nKonfidensitas: {ai_conf}\n\n{ai_note}")
                     if ai_label != label:
-                        st.info(f"⚠️ Hasil AI **berbeda** dengan TF-IDF — AI lebih akurat karena membaca makna teks")
+                        st.info("Hasil AI berbeda dengan TF-IDF — AI lebih akurat karena membaca makna teks")
             else:
-                st.caption("💡 Aktifkan AI provider di sidebar untuk analisis semantik")
+                st.caption("Set GROQ_API_KEY di Streamlit Secrets untuk analisis semantik")
 
-            # Detail reasoning
             catatan_lower = catatan_input.lower().strip()
             keywords_found = [kw for kw in KEYWORD_LAMPIRAN if kw in catatan_lower]
             alasan_butuh = alasan_input in ALASAN_BUTUH_BUKTI
 
-            with st.expander("🔬 Detail Analisis"):
+            with st.expander("Detail Analisis"):
                 selisih = (tgl_retur - tgl_pesanan).days
                 st.markdown(f"""
                 | Faktor | Nilai |
                 |--------|-------|
-                | Selisih Hari Pesanan → Retur | **{selisih} hari** |
-                | Alasan Butuh Bukti Visual | **{'Ya ⚠️' if alasan_butuh else 'Tidak'}** |
+                | Selisih Hari Pesanan ke Retur | **{selisih} hari** |
+                | Alasan Butuh Bukti Visual | **{'Ya' if alasan_butuh else 'Tidak'}** |
                 | Keyword Lampiran di Catatan | **{', '.join(keywords_found) if keywords_found else 'Tidak ada'}** |
                 | Catatan Kosong | **{'Ya' if not catatan_lower else 'Tidak'}** |
-                | Flag Perlu Dicek | **{'Ya 🔍' if (keywords_found or (alasan_butuh and not catatan_lower)) else 'Tidak'}** |
                 """)
 
 # ─── FOOTER ───────────────────────────────────────────────────────────────────
 st.markdown("---")
 st.markdown(
     "<div style='text-align:center; color:#888; font-size:12px;'>"
-    "Sistem Klasifikasi Retur Otomatis • Powered by Random Forest + IsolationForest"
+    "Sistem Klasifikasi Retur Otomatis — Powered by Random Forest + Groq AI"
     "</div>",
     unsafe_allow_html=True
 )
