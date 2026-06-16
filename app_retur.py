@@ -444,7 +444,7 @@ with tab1:
                 return ''
 
             st.dataframe(
-                df_filtered[display_cols].style.applymap(color_label, subset=['Rekomendasi']),
+                df_filtered[display_cols].style.map(color_label, subset=['Rekomendasi']),
                 use_container_width=True,
                 height=400
             )
